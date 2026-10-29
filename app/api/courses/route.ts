@@ -8,7 +8,7 @@ export async function GET() {
   await connectDB();
   const user = await requireUser();
   const filter = user?.role === "ADMIN" ? {} : { published: true };
-  const courses = await Course.find(filter).select("title description fee paymentInstructions published").sort({ createdAt: -1 }).lean();
+  const courses = await Course.find(filter).select("title description coverImage fee paymentInstructions published").sort({ createdAt: -1 }).lean();
   return NextResponse.json({ courses });
 }
 

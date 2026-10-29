@@ -10,14 +10,15 @@
     "build": "next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "admin:create": "node --env-file=.env.local --import tsx scripts/create-admin.ts"
+    "admin:create": "node --env-file=.env.local --import tsx scripts/create-admin.ts",
+    "db:migrate-exam-attempts": "node --env-file=.env.local --import tsx scripts/migrate-exam-attempts.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "jose": "^5.9.6",
     "mongoose": "^8.9.5",
-    "nodemailer": "^10.1.7",
     "next": "^16.4.2",
+    "nodemailer": "^10.1.7",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

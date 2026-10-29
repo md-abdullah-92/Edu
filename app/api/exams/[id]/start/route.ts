@@ -19,24 +19,34 @@ export async function POST(_request: Request, { params }: Context) {
   }
   const now = new Date();
   if (now < exam.startsAt || now > exam.endsAt) return errorResponse("পরীক্ষা এখন চালু নেই।");
-  if (await Result.exists({ exam: exam.id, student: student.id })) return errorResponse("এই পরীক্ষা ইতিমধ্যে জমা দিয়েছেন।", 409);
-  let attempt = await Attempt.findOne({ exam: exam.id, student: student.id });
-  if (!attempt) {
+  let attempt = await Attempt.findOne({ exam: exam.id, student: student.id, submittedAt: { $exists: false } }).sort({ attemptNumber: -1 });
+  if (!attempt || attempt.expiresAt <= now) {
+    if (attempt) {
+      attempt.submittedAt = attempt.expiresAt;
+      await attempt.save();
+    }
+    const previousAttemptCount = await Attempt.countDocuments({ exam: exam.id, student: student.id });
     const expiresAt = new Date(Math.min(now.getTime() + exam.durationMinutes * 60_000, exam.endsAt.getTime()));
     try {
-      attempt = await Attempt.create({ exam: exam.id, student: student.id, startedAt: now, expiresAt });
+      attempt = await Attempt.create({ exam: exam.id, student: student.id, attemptNumber: previousAttemptCount + 1, startedAt: now, expiresAt });
     } catch (error) {
       if (typeof error === "object" && error && "code" in error && error.code === 11000) {
-        attempt = await Attempt.findOne({ exam: exam.id, student: student.id });
+        attempt = await Attempt.findOne({ exam: exam.id, student: student.id, submittedAt: { $exists: false } }).sort({ attemptNumber: -1 });
       } else throw error;
     }
   }
+  if (attempt && !attempt.attemptNumber) {
+    attempt.attemptNumber = 1;
+    await attempt.save();
+  }
   if (!attempt || attempt.submittedAt || attempt.expiresAt < now) return errorResponse("পরীক্ষার সময় শেষ হয়েছে।", 409);
   return NextResponse.json({
-    attempt: { expiresAt: attempt.expiresAt },
+    attempt: { id: String(attempt._id), expiresAt: attempt.expiresAt },
     exam: {
       id: exam.id,
       title: exam.title,
+      negativeMarkingEnabled: exam.negativeMarkingEnabled,
+      negativeMarks: exam.negativeMarks,
       questions: exam.questions.map((question: { prompt: string; options: string[]; marks: number }) => ({
         prompt: question.prompt, options: question.options, marks: question.marks
       }))

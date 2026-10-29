@@ -7,14 +7,14 @@ import { errorResponse } from "@/lib/http";
 export async function GET() {
   if (!(await requireUser("ADMIN"))) return errorResponse("শুধু Admin এই তথ্য দেখতে পারবেন।", 403);
   await connectDB();
-  const results = await Result.find().select("+answers").populate("student", "name email mobile").populate({
+  const results = await Result.find().select("+answers attemptNumber wrongCount unansweredCount").populate("student", "name email mobile").populate({
     path: "exam",
     select: "title passMark questions",
     populate: { path: "course", select: "title" }
   }).sort({ submittedAt: -1 }).lean();
   const detailed = results.map((result) => {
     const exam = result.exam as unknown as {
-      title: string; passMark: number; questions: Array<{ prompt: string; options: string[]; correctIndex: number }>
+      title: string; passMark: number; questions: Array<{ prompt: string; options: string[]; correctIndex: number; explanation?: string }>
     };
     const answers = result.answers as number[];
     return {
@@ -23,13 +23,18 @@ export async function GET() {
       exam: { title: exam.title },
       score: result.score,
       totalMarks: result.totalMarks,
+      attemptNumber: result.attemptNumber ?? 1,
+      correctCount: result.correctCount,
+      wrongCount: result.wrongCount ?? 0,
+      unansweredCount: result.unansweredCount ?? 0,
       submittedAt: result.submittedAt,
       passed: result.score >= exam.passMark,
       details: exam.questions.map((question, index) => ({
         prompt: question.prompt,
         chosen: question.options[answers[index]] ?? "উত্তর দেননি",
         correct: question.options[question.correctIndex],
-        isCorrect: answers[index] === question.correctIndex
+        isCorrect: answers[index] === question.correctIndex,
+        explanation: question.explanation ?? ""
       }))
     };
   });

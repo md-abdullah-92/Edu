@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { GridFSBucket } from "mongodb";
 
 function getMongoUri() {
   const uri = process.env.MONGODB_URI;
@@ -26,4 +27,16 @@ export async function connectDB() {
     cached.promise = null;
     throw error;
   }
+}
+
+export function courseCoverBucket() {
+  const database = mongoose.connection.db;
+  if (!database) throw new Error("MongoDB is not connected");
+  return new GridFSBucket(database, { bucketName: "courseCovers" });
+}
+
+export function studyMaterialBucket() {
+  const database = mongoose.connection.db;
+  if (!database) throw new Error("MongoDB is not connected");
+  return new GridFSBucket(database, { bucketName: "studyMaterials" });
 }

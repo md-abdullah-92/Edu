@@ -1,31 +1,45 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type User = { id: string; name: string; role: "ADMIN" | "STUDENT" };
-type Course = { _id: string; title: string; description: string; fee: number; paymentInstructions: string; published: boolean };
+type Course = { _id: string; title: string; description: string; coverImage?: string; fee: number; paymentInstructions: string; published: boolean };
 type Enrollment = {
   _id: string; status: "PENDING" | "APPROVED" | "REJECTED"; transactionId: string; paymentMethod: string;
   senderMobile: string; rejectionReason?: string; student?: { name: string; mobile?: string; email?: string }; course: Course | { title: string; fee: number }
 };
-type ExamAnswerDetail = { prompt: string; options: string[]; chosenIndex: number | null; correctIndex: number; isCorrect: boolean; marks: number; earnedMarks: number };
+type ExamAnswerDetail = { prompt: string; options: string[]; chosenIndex: number | null; correctIndex: number; isCorrect: boolean; marks: number; earnedMarks: number; explanation: string };
 type ExamResult = {
+  attemptNumber: number;
   score: number;
   totalMarks: number;
   correctCount: number;
+  wrongCount: number;
+  unansweredCount: number;
+  rank: number;
+  rankTotal: number;
   submittedAt: string;
   passed: boolean;
   details: ExamAnswerDetail[];
 };
-type Exam = { id: string; title: string; durationMinutes: number; startsAt: string; endsAt: string; passMark: number; questionCount: number; result?: ExamResult | null };
-type Question = { prompt: string; options: string[]; correctIndex: number; marks: number };
-type Material = { _id: string; title: string; description: string; url: string; kind: string };
-type ResultRow = { id: string; student: { name: string; email?: string; mobile?: string }; exam: { title: string }; score: number; totalMarks: number; submittedAt: string; passed: boolean; details: Array<{ prompt: string; chosen: string; correct: string; isCorrect: boolean }> };
+type Exam = {
+  id: string; title: string; durationMinutes: number; startsAt: string; endsAt: string; passMark: number;
+  questionCount: number; negativeMarkingEnabled: boolean; negativeMarks: number; leaderboardRule: "FIRST" | "HIGHEST" | "LATEST";
+  results: ExamResult[]; leaderboard: Array<{ rank: number; name: string; score: number; totalMarks: number }>;
+};
+type Question = { prompt: string; options: string[]; correctIndex: number; marks: number; explanation: string };
+type Material = { _id: string; title: string; description: string; url: string; kind: string; fileName?: string; fileSize?: number };
+type ResultRow = {
+  id: string; student: { name: string; email?: string; mobile?: string }; exam: { title: string }; score: number;
+  totalMarks: number; attemptNumber: number; correctCount: number; wrongCount: number; unansweredCount: number;
+  submittedAt: string; passed: boolean;
+  details: Array<{ prompt: string; chosen: string; correct: string; isCorrect: boolean; explanation: string }>;
+};
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...options,
-    headers: { ...(options?.body ? { "Content-Type": "application/json" } : {}), ...options?.headers },
+    headers: { ...(options?.body && !(options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}), ...options?.headers },
     cache: "no-store"
   });
   const payload = await response.json().catch(() => ({}));
@@ -35,6 +49,22 @@ async function api<T>(url: string, options?: RequestInit): Promise<T> {
 
 function money(value: number) {
   return `৳${Number(value).toLocaleString("bn-BD")}`;
+}
+
+async function compressCourseImage(file: File): Promise<File> {
+  if (!file.type.startsWith("image/") || file.size > 5_000_000) throw new Error("৫ MB-এর কম একটি ছবি নির্বাচন করুন।");
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, 1280 / bitmap.width);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("ছবিটি প্রক্রিয়া করা যায়নি।");
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.78));
+  if (!blob || blob.size > 5_000_000) throw new Error("ছবিটি সংকুচিত করা যায়নি। ছোট ছবি বেছে নিন।");
+  return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
 }
 
 export default function Dashboard() {
@@ -51,11 +81,23 @@ export default function Dashboard() {
   const [pendingEmail, setPendingEmail] = useState("");
   const [paymentCourse, setPaymentCourse] = useState<Course | null>(null);
   const [editingCourse, setEditingCourse] = useState<Course | null>(null);
+  const [coverImageUrl, setCoverImageUrl] = useState("");
+  const [coverImageFile, setCoverImageFile] = useState<File | null>(null);
+  const [coverImagePreview, setCoverImagePreview] = useState("");
+  const [coverImageRemoved, setCoverImageRemoved] = useState(false);
   const [examCourse, setExamCourse] = useState<Course | null>(null);
   const [examQuestions, setExamQuestions] = useState<Question[]>([blankQuestion()]);
-  const [examTaking, setExamTaking] = useState<{ id: string; title: string; questions: Array<{ prompt: string; options: string[]; marks: number }>; expiresAt: string } | null>(null);
+  const [negativeMarkingEnabled, setNegativeMarkingEnabled] = useState(false);
+  const [negativeMarks, setNegativeMarks] = useState(0.25);
+  const [leaderboardRule, setLeaderboardRule] = useState<"FIRST" | "HIGHEST" | "LATEST">("HIGHEST");
+  const [examTaking, setExamTaking] = useState<{ id: string; attemptId: string; title: string; negativeMarkingEnabled: boolean; negativeMarks: number; questions: Array<{ prompt: string; options: string[]; marks: number }>; expiresAt: string } | null>(null);
   const [answers, setAnswers] = useState<number[]>([]);
+  const [currentQuestion, setCurrentQuestion] = useState(0);
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
+  const submittingExam = useRef(false);
   const [materials, setMaterials] = useState<Material[]>([]);
+  const [materialKind, setMaterialKind] = useState("PDF");
+  const materialFileInput = useRef<HTMLInputElement>(null);
   const [selectedMaterialCourse, setSelectedMaterialCourse] = useState("");
   const [exams, setExams] = useState<Exam[]>([]);
   const [adminStats, setAdminStats] = useState({ students: 0, pendingPayments: 0, courses: 0, exams: 0 });
@@ -64,8 +106,24 @@ export default function Dashboard() {
   const [results, setResults] = useState<ResultRow[]>([]);
 
   function blankQuestion(): Question {
-    return { prompt: "", options: ["", "", "", ""], correctIndex: 0, marks: 1 };
+    return { prompt: "", options: ["", "", "", ""], correctIndex: 0, marks: 1, explanation: "" };
   }
+
+  useEffect(() => {
+    setCoverImageUrl(editingCourse?.coverImage ?? "");
+    setCoverImageFile(null);
+    setCoverImageRemoved(false);
+  }, [editingCourse]);
+
+  useEffect(() => {
+    if (!coverImageFile) {
+      setCoverImagePreview("");
+      return;
+    }
+    const previewUrl = URL.createObjectURL(coverImageFile);
+    setCoverImagePreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [coverImageFile]);
 
   const loadBase = useCallback(async (current: User) => {
     const [courseData, enrollmentData] = await Promise.all([
@@ -227,15 +285,33 @@ export default function Dashboard() {
     }
   }
 
+  async function uploadCourseCover(courseId: string, file: File) {
+    const formData = new FormData();
+    formData.append("image", file);
+    const response = await fetch(`/api/courses/${courseId}/cover`, { method: "PUT", body: formData, cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error ?? "কোর্সের ছবি আপলোড করা যায়নি।");
+  }
+
   async function createCourse(form: FormData) {
-    await api("/api/courses", {
+    const { course } = await api<{ course: Course }>("/api/courses", {
       method: "POST",
       body: JSON.stringify({
         title: form.get("title"), description: form.get("description"), fee: Number(form.get("fee")),
         paymentInstructions: form.get("paymentInstructions"), published: form.get("published") === "on"
       })
     });
+    if (coverImageFile) {
+      try {
+        await uploadCourseCover(course._id, coverImageFile);
+      } catch (cause) {
+        setCoverImageFile(null);
+        await refresh();
+        throw new Error(`কোর্স তৈরি হয়েছে, কিন্তু ছবি আপলোড হয়নি। কোর্সটি সম্পাদনা করে আবার চেষ্টা করুন। ${cause instanceof Error ? cause.message : ""}`);
+      }
+    }
     setMessage("কোর্স তৈরি হয়েছে।");
+    setCoverImageFile(null);
     await refresh();
   }
 
@@ -248,6 +324,8 @@ export default function Dashboard() {
         paymentInstructions: form.get("paymentInstructions"), published: form.get("published") === "on"
       })
     });
+    if (coverImageFile) await uploadCourseCover(editingCourse._id, coverImageFile);
+    else if (coverImageRemoved) await api(`/api/courses/${editingCourse._id}/cover`, { method: "DELETE" });
     setEditingCourse(null);
     setMessage("কোর্স আপডেট হয়েছে।");
     await refresh();
@@ -259,13 +337,37 @@ export default function Dashboard() {
     setMessage(published ? "কোর্স প্রকাশিত হয়েছে।" : "কোর্সের প্রকাশনা বন্ধ হয়েছে।");
   }
 
+  async function deleteCourse(course: Course) {
+    const confirmed = window.confirm(`"${course.title}" কোর্সটি স্থায়ীভাবে মুছে যাবে। এর এনরোলমেন্ট, স্টাডি ম্যাটেরিয়াল, পরীক্ষা, সব ফলাফল এবং কভার ছবিও মুছে যাবে। এগিয়ে যাবেন?`);
+    if (!confirmed) return;
+    await api(`/api/courses/${course._id}`, { method: "DELETE" });
+    if (selectedMaterialCourse === course._id) {
+      setSelectedMaterialCourse("");
+      setExams([]);
+      setMaterials([]);
+    }
+    setEditingCourse(null);
+    setMessage("কোর্স ও সংশ্লিষ্ট তথ্য মুছে ফেলা হয়েছে।");
+    await refresh();
+  }
+
   async function createMaterial(form: FormData) {
     const courseId = String(form.get("courseId"));
-    await api(`/api/courses/${courseId}/materials`, {
-      method: "POST", body: JSON.stringify({
-        title: form.get("title"), description: form.get("description"), url: form.get("url"), kind: form.get("kind")
-      })
-    });
+    if (materialKind === "PDF") {
+      const file = form.get("file");
+      if (!(file instanceof File) || file.size === 0) throw new Error("PDF ফাইল নির্বাচন করুন।");
+      if (file.type !== "application/pdf" || file.size > 20_000_000) throw new Error("২০ MB-এর কম একটি বৈধ PDF ফাইল দিন।");
+      form.delete("kind");
+      form.delete("url");
+      await api(`/api/courses/${courseId}/materials`, { method: "POST", body: form });
+      if (materialFileInput.current) materialFileInput.current.value = "";
+    } else {
+      await api(`/api/courses/${courseId}/materials`, {
+        method: "POST", body: JSON.stringify({
+          title: form.get("title"), description: form.get("description"), url: form.get("url"), kind: materialKind
+        })
+      });
+    }
     setMessage("স্টাডি ম্যাটেরিয়াল যুক্ত হয়েছে।");
     form.set("title", "");
     if (selectedMaterialCourse === courseId) {
@@ -281,42 +383,62 @@ export default function Dashboard() {
       body: JSON.stringify({
         title: form.get("title"), durationMinutes: Number(form.get("durationMinutes")),
         passMark: Number(form.get("passMark")), startsAt: new Date(String(form.get("startsAt"))).toISOString(),
-        endsAt: new Date(String(form.get("endsAt"))).toISOString(), questions: examQuestions
+        endsAt: new Date(String(form.get("endsAt"))).toISOString(), questions: examQuestions,
+        negativeMarkingEnabled, negativeMarks, leaderboardRule
       })
     });
     setMessage(`"${result.exam.title}" পরীক্ষা তৈরি হয়েছে।`);
     setExamCourse(null);
     setExamQuestions([blankQuestion()]);
+    setNegativeMarkingEnabled(false);
+    setNegativeMarks(0.25);
+    setLeaderboardRule("HIGHEST");
     await refresh();
   }
 
   async function startExam(exam: Exam) {
     try {
-      const data = await api<{ exam: { id: string; title: string; questions: Array<{ prompt: string; options: string[]; marks: number }> }; attempt: { expiresAt: string } }>(`/api/exams/${exam.id}/start`, { method: "POST" });
-      setExamTaking({ ...data.exam, expiresAt: data.attempt.expiresAt });
+      const data = await api<{ exam: { id: string; title: string; negativeMarkingEnabled: boolean; negativeMarks: number; questions: Array<{ prompt: string; options: string[]; marks: number }> }; attempt: { id: string; expiresAt: string } }>(`/api/exams/${exam.id}/start`, { method: "POST" });
+      setExamTaking({ ...data.exam, attemptId: data.attempt.id, expiresAt: data.attempt.expiresAt });
       setAnswers(data.exam.questions.map(() => -1));
+      setCurrentQuestion(0);
+      setRemainingSeconds(Math.max(0, Math.ceil((new Date(data.attempt.expiresAt).getTime() - Date.now()) / 1000)));
+      submittingExam.current = false;
       setError("");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "পরীক্ষা শুরু করা যায়নি।"); }
   }
 
   async function submitExam() {
-    if (!examTaking || answers.includes(-1)) {
-      setError("জমা দেওয়ার আগে সব প্রশ্নের উত্তর নির্বাচন করুন।");
-      return;
-    }
+    if (!examTaking || submittingExam.current) return;
+    submittingExam.current = true;
     try {
-      const data = await api<{ result: { score: number; totalMarks: number; correctCount: number; questionCount: number; passed: boolean } }>(`/api/exams/${examTaking.id}/submit`, {
-        method: "POST", body: JSON.stringify({ answers })
+      const data = await api<{ result: { score: number; totalMarks: number; correctCount: number; wrongCount: number; unansweredCount: number; questionCount: number; passed: boolean; rank: number; rankTotal: number } }>(`/api/exams/${examTaking.id}/submit`, {
+        method: "POST", body: JSON.stringify({ attemptId: examTaking.attemptId, answers })
       });
-      setMessage(`পরীক্ষা জমা হয়েছে: ${data.result.score}/${data.result.totalMarks} নম্বর — ${data.result.passed ? "উত্তীর্ণ" : "অনুত্তীর্ণ"}`);
+      setMessage(`ফলাফল: ${data.result.score}/${data.result.totalMarks} নম্বর · র‍্যাংক ${data.result.rank}/${data.result.rankTotal} · ${data.result.correctCount} সঠিক · ${data.result.wrongCount} ভুল · ${data.result.unansweredCount} উত্তরহীন · ${data.result.passed ? "উত্তীর্ণ" : "অনুত্তীর্ণ"}`);
       setExamTaking(null);
       if (selectedMaterialCourse) {
         const { exams: updatedExams } = await api<{ exams: Exam[] }>(`/api/courses/${selectedMaterialCourse}/exams`);
         setExams(updatedExams);
       }
       await refresh();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "উত্তর জমা করা যায়নি।"); }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "উত্তর জমা করা যায়নি।");
+      submittingExam.current = false;
+    }
   }
+
+  useEffect(() => {
+    if (!examTaking) return;
+    const updateCountdown = () => {
+      const seconds = Math.max(0, Math.ceil((new Date(examTaking.expiresAt).getTime() - Date.now()) / 1000));
+      setRemainingSeconds(seconds);
+      if (seconds === 0) void submitExam();
+    };
+    updateCountdown();
+    const interval = window.setInterval(updateCountdown, 1000);
+    return () => window.clearInterval(interval);
+  }, [examTaking, answers]);
 
   const navItems = user?.role === "ADMIN"
     ? ["Dashboard", "Students", "Payment Requests", "Courses", "Study Materials", "MCQ Exam Builder", "Results"]
@@ -371,6 +493,8 @@ export default function Dashboard() {
     <main className="main-area">
       <header className="topbar"><div><span className="breadcrumb">EduPrepX <span>/</span> {title}</span><h1>{title}</h1></div><div className="top-actions"><span className="today">{new Date().toLocaleDateString("bn-BD", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</span><button className="notification" title="Notifications">♧<i /></button><span className="avatar">{user.name.slice(0, 1).toUpperCase()}</span><button className="logout-button" onClick={signOut}><span aria-hidden="true">↪</span><span>Log out</span></button></div></header>
       <div className="content">
+        {user.role === "ADMIN" && tab === "Courses" && !editingCourse && <div className="panel course-cover-editor"><div><strong>কোর্সের কভার ছবি</strong><p className="muted">JPEG, PNG বা WebP · সর্বোচ্চ ৫ MB; ছবির ফাইল MongoDB GridFS-এ থাকবে।</p></div><label className="cover-upload">ছবি নির্বাচন করুন<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void runAction(async () => { setCoverImageFile(await compressCourseImage(file)); setCoverImageRemoved(false); }); }} /></label>{coverImagePreview && <><img src={coverImagePreview} alt="কোর্স কভার প্রিভিউ" /><button className="text-button danger-text" type="button" onClick={() => setCoverImageFile(null)}>ছবি সরান</button></>}</div>}
+        {user.role === "ADMIN" && tab === "MCQ Exam Builder" && examCourse && <div className="panel exam-authoring-settings"><h3>পরীক্ষার নম্বর ও ব্যাখ্যা</h3><div className="exam-settings-grid"><label className="check-label"><input type="checkbox" checked={negativeMarkingEnabled} onChange={(event) => setNegativeMarkingEnabled(event.target.checked)} /> ভুল উত্তরে নম্বর কাটুন</label><label>প্রতি ভুল উত্তরে কর্তন<input type="number" min="0" step="0.01" value={negativeMarks} disabled={!negativeMarkingEnabled} onChange={(event) => setNegativeMarks(Number(event.target.value))} /></label><label>মেধাতালিকার নিয়ম<select value={leaderboardRule} onChange={(event) => setLeaderboardRule(event.target.value as typeof leaderboardRule)}><option value="FIRST">প্রথম প্রচেষ্টা</option><option value="HIGHEST">সর্বোচ্চ নম্বর</option><option value="LATEST">সর্বশেষ প্রচেষ্টা</option></select></label></div><div className="explanation-list"><strong>প্রশ্নের ব্যাখ্যা</strong>{examQuestions.map((question, index) => <label key={index}>প্রশ্ন {index + 1}<textarea rows={2} maxLength={2000} value={question.explanation} onChange={(event) => setExamQuestions(examQuestions.map((item, itemIndex) => itemIndex === index ? { ...item, explanation: event.target.value } : item))} placeholder="সঠিক উত্তরের কারণ লিখুন" /></label>)}</div></div>}
         {message && <div className="alert success dismissible">{message}<button onClick={() => setMessage("")}>×</button></div>}
         {error && <div className="alert error dismissible">{error}<button onClick={() => setError("")}>×</button></div>}
         {user.role === "ADMIN" && tab === "Dashboard" && <section>
@@ -387,32 +511,31 @@ export default function Dashboard() {
         </section>}
         {user.role === "ADMIN" && tab === "Students" && <section><div className="section-heading"><div><h2>শিক্ষার্থী পরিচালনা</h2><p className="muted">নিবন্ধিত শিক্ষার্থীদের অ্যাকাউন্ট ও কার্যক্রম</p></div><span className="pill">{students.length} জন</span></div><div className="table-wrap"><table><thead><tr><th>শিক্ষার্থী</th><th>ইমেইল</th><th>এনরোলমেন্ট</th><th>পরীক্ষার ফল</th><th>অ্যাকাউন্ট</th><th>যোগদানের তারিখ</th><th>পরিচালনা</th></tr></thead><tbody>{students.map((student) => <tr key={student._id}><td><div className="person"><span className="avatar small">{student.name.slice(0, 1)}</span><strong>{student.name}</strong></div></td><td>{student.email ?? student.mobile ?? "—"}</td><td>{student.enrollments}</td><td>{student.results}</td><td><span className={`status ${student.active ? "approved" : "rejected"}`}>{student.active ? "ACTIVE" : "INACTIVE"}</span></td><td>{new Date(student.createdAt).toLocaleDateString("bn-BD")}</td><td><button className={student.active ? "reject-button" : "approve-button"} onClick={() => toggleStudent(student)}>{student.active ? "Deactivate" : "Activate"}</button></td></tr>)}</tbody></table>{students.length === 0 && <Empty text="কোনো শিক্ষার্থী নেই।" />}</div></section>}
         {user.role === "ADMIN" && tab === "Payment Requests" && <section><div className="section-heading"><div><h2>পেমেন্ট রিকোয়েস্ট</h2><p className="muted">Transaction ID এবং পেমেন্টের তথ্য ম্যানুয়ালি যাচাই করুন।</p></div><span className="pill amber">{requests.filter((request) => request.status === "PENDING").length} Pending</span></div><PaymentTable requests={requests} decide={decidePayment} isAdmin /></section>}
-        {user.role === "ADMIN" && tab === "Courses" && <section><div className="section-heading"><div><h2>কোর্স পরিচালনা</h2><p className="muted">কোর্স তৈরি করুন, ফি ও পেমেন্ট নির্দেশনা নির্ধারণ করুন।</p></div></div><div className="two-panel"><form className="panel stack-form" onSubmit={(event) => submitForm(event, createCourse)}><h3>নতুন কোর্স তৈরি</h3><label>কোর্সের নাম<input name="title" placeholder="যেমন: BCS Preliminary Preparation" required /></label><label>কোর্সের বিবরণ<textarea name="description" rows={3} required /></label><label>কোর্স ফি (৳)<input name="fee" type="number" min="0" step="1" required /></label><label>পেমেন্ট নির্দেশনা<textarea name="paymentInstructions" rows={2} placeholder="Merchant নম্বর ও পেমেন্টের নির্দেশনা লিখুন" required /></label><label className="check-label"><input type="checkbox" name="published" /> তৈরি করেই প্রকাশ করুন</label><button className="primary" disabled={busy}>কোর্স তৈরি করুন</button></form><div className="panel"><h3>সকল কোর্স <span className="pill">{courses.length}</span></h3>{courses.map((course) => <div className="course-admin" key={course._id}><div><strong>{course.title}</strong><p className="muted">{money(course.fee)} · {course.description}</p></div><div className="action-row"><button className="small-button" onClick={() => setEditingCourse(course)}>Edit</button><button className={course.published ? "small-button" : "small-button primary-small"} onClick={() => updateCourse(course, !course.published)}>{course.published ? "প্রকাশিত" : "প্রকাশ করুন"}</button></div></div>)}{!courses.length && <Empty text="এখনও কোনো কোর্স তৈরি হয়নি।" />}</div></div></section>}
-        {user.role === "ADMIN" && tab === "Study Materials" && <section><div className="section-heading"><div><h2>স্টাডি ম্যাটেরিয়াল</h2><p className="muted">কোর্সের জন্য PDF, নোট ও শেখার লিংক যোগ করুন।</p></div></div><div className="two-panel"><form className="panel stack-form" onSubmit={(event) => submitForm(event, createMaterial)}><h3>নতুন উপকরণ যোগ করুন</h3><label>কোর্স<select name="courseId" required defaultValue=""><option value="" disabled>কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select></label><label>শিরোনাম<input name="title" required /></label><label>ধরন<select name="kind"><option value="PDF">PDF</option><option value="NOTE">Note</option><option value="LINK">Link</option></select></label><label>ফাইল/কনটেন্ট URL<input name="url" type="url" placeholder="https://..." required /></label><label>বিবরণ<textarea name="description" rows={2} /></label><button className="primary">উপকরণ যোগ করুন</button><p className="form-hint">এখানে একটি secure file URL যোগ করুন; আপলোড স্টোরেজ কনফিগার করা নেই।</p></form><div className="panel"><h3>কোর্সের উপকরণ দেখুন</h3><select value={selectedMaterialCourse} onChange={(event) => setSelectedMaterialCourse(event.target.value)}><option value="">কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select><MaterialList materials={materials} /></div></div></section>}
+        {user.role === "ADMIN" && tab === "Courses" && <section><div className="section-heading"><div><h2>কোর্স পরিচালনা</h2><p className="muted">কোর্স তৈরি করুন, ফি ও পেমেন্ট নির্দেশনা নির্ধারণ করুন।</p></div></div><div className="two-panel"><form className="panel stack-form" onSubmit={(event) => submitForm(event, createCourse)}><h3>নতুন কোর্স তৈরি</h3><label>কোর্সের নাম<input name="title" placeholder="যেমন: BCS Preliminary Preparation" required /></label><label>কোর্সের বিবরণ<textarea name="description" rows={3} required /></label><label>কোর্স ফি (৳)<input name="fee" type="number" min="0" step="1" required /></label><label>পেমেন্ট নির্দেশনা<textarea name="paymentInstructions" rows={2} placeholder="Merchant নম্বর ও পেমেন্টের নির্দেশনা লিখুন" required /></label><label className="check-label"><input type="checkbox" name="published" /> তৈরি করেই প্রকাশ করুন</label><button className="primary" disabled={busy}>কোর্স তৈরি করুন</button></form><div className="panel"><h3>সকল কোর্স <span className="pill">{courses.length}</span></h3>{courses.map((course) => <div className="course-admin" key={course._id}><div><strong>{course.title}</strong><p className="muted">{money(course.fee)} · {course.description}</p></div><div className="action-row"><button className="small-button" onClick={() => setEditingCourse(course)}>Edit</button><button className={course.published ? "small-button" : "small-button primary-small"} onClick={() => updateCourse(course, !course.published)}>{course.published ? "প্রকাশিত" : "প্রকাশ করুন"}</button><button className="small-button delete-course-button" onClick={() => void runAction(() => deleteCourse(course))}>মুছুন</button></div></div>)}{!courses.length && <Empty text="এখনও কোনো কোর্স তৈরি হয়নি।" />}</div></div></section>}
+        {user.role === "ADMIN" && tab === "Study Materials" && <section><div className="section-heading"><div><h2>স্টাডি ম্যাটেরিয়াল</h2><p className="muted">PDF MongoDB GridFS-এ রাখুন; নোট/লিংকের URL সরাসরি যোগ করুন।</p></div></div><div className="two-panel"><form className="panel stack-form" onSubmit={(event) => submitForm(event, createMaterial)}><h3>নতুন উপকরণ যোগ করুন</h3><label>কোর্স<select name="courseId" required defaultValue=""><option value="" disabled>কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select></label><label>শিরোনাম<input name="title" required /></label><label>ধরন<select value={materialKind} onChange={(event) => setMaterialKind(event.target.value)}><option value="PDF">PDF ফাইল</option><option value="NOTE">Note URL</option><option value="LINK">External link</option></select></label>{materialKind === "PDF" ? <label>PDF ফাইল · সর্বোচ্চ ২০ MB<input ref={materialFileInput} name="file" type="file" accept="application/pdf,.pdf" required /></label> : <label>ফাইল/কনটেন্ট URL<input name="url" type="url" placeholder="https://..." required /></label>}<label>বিবরণ<textarea name="description" rows={2} /></label><button className="primary" disabled={busy}>উপকরণ যোগ করুন</button></form><div className="panel"><h3>কোর্সের উপকরণ দেখুন</h3><select value={selectedMaterialCourse} onChange={(event) => setSelectedMaterialCourse(event.target.value)}><option value="">কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select><MaterialList materials={materials} /></div></div></section>}
         {user.role === "ADMIN" && tab === "MCQ Exam Builder" && <section><div className="section-heading"><div><h2>MCQ Exam Builder</h2><p className="muted">সঠিক উত্তর সার্ভার-সাইডে সংরক্ষিত হবে, পরীক্ষার্থীর কাছে যাবে না।</p></div><button className="primary" onClick={() => setExamCourse(courses[0] ?? null)}>＋ নতুন পরীক্ষা</button></div>{examCourse && <form className="panel exam-builder stack-form" onSubmit={(event) => submitForm(event, createExam)}><div className="section-heading"><h3>পরীক্ষার তথ্য</h3><button type="button" className="icon-button" onClick={() => setExamCourse(null)}>×</button></div><label>কোর্স<select value={examCourse._id} onChange={(event) => setExamCourse(courses.find((course) => course._id === event.target.value) ?? null)}>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select></label><label>পরীক্ষার শিরোনাম<input name="title" placeholder="যেমন: Data Structure — Weekly Quiz" required /></label><div className="three-col"><label>সময় (মিনিট)<input name="durationMinutes" type="number" min="1" max="360" defaultValue="30" required /></label><label>Pass mark<input name="passMark" type="number" min="0" step="0.5" defaultValue="5" required /></label><label>শুরু হবে<input name="startsAt" type="datetime-local" required /></label></div><label>শেষ হবে<input name="endsAt" type="datetime-local" required /></label><div className="builder-heading"><h3>প্রশ্ন ও উত্তর</h3><span className="muted">প্রতি প্রশ্নে ঠিক ৪টি অপশন</span></div>{examQuestions.map((question, index) => <div className="question-editor" key={index}><div className="question-title"><strong>প্রশ্ন {index + 1}</strong>{examQuestions.length > 1 && <button type="button" className="text-button danger-text" onClick={() => setExamQuestions(examQuestions.filter((_, i) => i !== index))}>মুছুন</button>}</div><label>প্রশ্ন<input value={question.prompt} onChange={(event) => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, prompt: event.target.value } : q))} required /></label><div className="options-grid">{question.options.map((option, optionIndex) => <label key={optionIndex}>Option {String.fromCharCode(65 + optionIndex)}<div className="option-input"><input value={option} onChange={(event) => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, options: q.options.map((value, n) => n === optionIndex ? event.target.value : value) } : q))} required /><input aria-label={`Option ${optionIndex + 1} সঠিক উত্তর`} type="radio" checked={question.correctIndex === optionIndex} onChange={() => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, correctIndex: optionIndex } : q))} /></div></label>)}</div><label className="marks-input">Marks per question<input type="number" min="0.1" step="0.1" value={question.marks} onChange={(event) => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, marks: Number(event.target.value) } : q))} required /></label></div>)}<button type="button" className="secondary" onClick={() => setExamQuestions([...examQuestions, blankQuestion()])}>＋ আরেকটি প্রশ্ন যোগ করুন</button><div className="builder-footer"><span>মোট নম্বর: <strong>{examQuestions.reduce((sum, q) => sum + Number(q.marks || 0), 0)}</strong></span><button className="primary" disabled={busy}>পরীক্ষা তৈরি করুন</button></div></form>}<div className="panel"><h3>কোর্স বেছে নিয়ে পরীক্ষার তালিকা</h3><select value={selectedMaterialCourse} onChange={(event) => setSelectedMaterialCourse(event.target.value)}><option value="">কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select>{exams.map((exam) => <div className="course-admin" key={exam.id}><div><strong>{exam.title}</strong><p className="muted">{exam.questionCount} প্রশ্ন · {exam.durationMinutes} মিনিট · Pass mark {exam.passMark}</p></div><span className="status approved">READY</span></div>)}</div></section>}
-        {user.role === "ADMIN" && tab === "Results" && <section><div className="section-heading"><div><h2>পরীক্ষার ফলাফল</h2><p className="muted">শিক্ষার্থীর নম্বর, সঠিক/ভুল উত্তর ও ফলাফল</p></div></div><div className="results-list">{results.map((result) => <details className="result-card" key={result.id}><summary><div className="result-summary"><span className="avatar small">{result.student.name.slice(0, 1)}</span><div><strong>{result.student.name} · {result.exam.title}</strong><small>{result.student.email ?? result.student.mobile} · {new Date(result.submittedAt).toLocaleString("bn-BD")}</small></div></div><span className={`status ${result.passed ? "approved" : "rejected"}`}>{result.score}/{result.totalMarks} · {result.passed ? "PASS" : "FAIL"}</span></summary><div className="answer-review">{result.details.map((answer, i) => <div key={i}><strong>{i + 1}. {answer.prompt}</strong><p className={answer.isCorrect ? "correct-answer" : "wrong-answer"}>শিক্ষার্থীর উত্তর: {answer.chosen} {answer.isCorrect ? "✓" : "✗"}</p>{!answer.isCorrect && <p className="correct-answer">সঠিক উত্তর: {answer.correct}</p>}</div>)}</div></details>)}{!results.length && <Empty text="এখনও পরীক্ষার ফল নেই।" />}</div></section>}
+        {user.role === "ADMIN" && tab === "Results" && <section><div className="section-heading"><div><h2>পরীক্ষার ফলাফল</h2><p className="muted">শিক্ষার্থীর প্রতিটি প্রচেষ্টার নম্বর, উত্তর ও ফলাফল</p></div></div><div className="results-list">{results.map((result) => <details className="result-card" key={result.id}><summary><div className="result-summary"><span className="avatar small">{result.student.name.slice(0, 1)}</span><div><strong>{result.student.name} · {result.exam.title} · প্রচেষ্টা {result.attemptNumber}</strong><small>{result.student.email ?? result.student.mobile} · {new Date(result.submittedAt).toLocaleString("bn-BD")}</small></div></div><span className={`status ${result.passed ? "approved" : "rejected"}`}>{result.score}/{result.totalMarks} · {result.passed ? "PASS" : "FAIL"}</span></summary><div className="attempt-counts"><span>সঠিক {result.correctCount}</span><span>ভুল {result.wrongCount}</span><span>উত্তরহীন {result.unansweredCount}</span></div><div className="answer-review">{result.details.map((answer, i) => <div key={i}><strong>{i + 1}. {answer.prompt}</strong><p className={answer.isCorrect ? "correct-answer" : "wrong-answer"}>শিক্ষার্থীর উত্তর: {answer.chosen} {answer.isCorrect ? "✓" : "✗"}</p>{!answer.isCorrect && <p className="correct-answer">সঠিক উত্তর: {answer.correct}</p>}{answer.explanation && <p className="answer-explanation"><strong>ব্যাখ্যা:</strong> {answer.explanation}</p>}</div>)}</div></details>)}{!results.length && <Empty text="এখনও পরীক্ষার ফল নেই।" />}</div></section>}
 
         {user.role === "STUDENT" && tab === "Course Catalog" && <section><div className="welcome-row"><div><span className="eyebrow">DISCOVER</span><h2>আপনার পরবর্তী কোর্সটি খুঁজুন</h2><p className="muted">পছন্দের কোর্স বেছে নিয়ে এনরোলমেন্ট রিকোয়েস্ট করুন।</p></div></div><div className="course-grid">{courses.map((course, index) => {
           const enrollment = enrollments.find((item) => typeof item.course === "object" && "_id" in item.course && item.course._id === course._id);
-          return <article className="course-card" key={course._id}><div className={`course-art art-${index % 4}`}><span>COURSE</span><span className="art-symbol">{["◈", "▤", "⌘", "✦"][index % 4]}</span></div><div className="course-card-content"><div className="course-meta"><span>EDUPREPX PROGRAM</span><strong>{money(course.fee)}</strong></div><h3>{course.title}</h3><p>{course.description}</p><div className="course-card-footer">{enrollment ? <StatusPill status={enrollment.status} /> : <button className="primary" onClick={() => setPaymentCourse(course)}>Enroll now <span>→</span></button>}<span className="course-link">↗</span></div></div></article>;
+          return <article className="course-card" key={course._id}><div className={`course-art art-${index % 4}`} style={course.coverImage ? { backgroundImage: `linear-gradient(rgba(14,32,28,.2),rgba(14,32,28,.2)),url("${course.coverImage}")` } : undefined}><span>COURSE</span><span className="art-symbol">{["◈", "▤", "⌘", "✦"][index % 4]}</span></div><div className="course-card-content"><div className="course-meta"><span>EDUPREPX PROGRAM</span><strong>{money(course.fee)}</strong></div><h3>{course.title}</h3><p>{course.description}</p><div className="course-card-footer">{enrollment ? <StatusPill status={enrollment.status} /> : <button className="primary" onClick={() => setPaymentCourse(course)}>Enroll now <span>→</span></button>}<span className="course-link">↗</span></div></div></article>;
         })}{!courses.length && <Empty text="এখনও কোনো কোর্স প্রকাশিত হয়নি।" />}</div></section>}
         {user.role === "STUDENT" && tab === "My Enrollments" && <section><div className="section-heading"><div><h2>আমার এনরোলমেন্ট</h2><p className="muted">পেমেন্ট যাচাই ও কোর্স অ্যাক্সেসের অবস্থা।</p></div></div><div className="panel table-wrap"><table><thead><tr><th>কোর্স</th><th>Transaction ID</th><th>পেমেন্ট</th><th>অবস্থা</th><th>বিবরণ</th></tr></thead><tbody>{enrollments.map((item) => <tr key={item._id}><td><strong>{paymentCourseName(item)}</strong></td><td className="mono">{item.transactionId}</td><td>{item.paymentMethod} · {item.senderMobile}</td><td><StatusPill status={item.status} /></td><td>{item.status === "REJECTED" ? item.rejectionReason : item.status === "APPROVED" ? "কোর্স অ্যাক্সেস চালু" : "Admin যাচাই করছেন"}</td></tr>)}</tbody>{!enrollments.length && <></>}</table>{!enrollments.length && <Empty text="আপনি এখনও কোনো কোর্সে এনরোল করেননি।" />}</div></section>}
         {user.role === "STUDENT" && tab === "Study Materials" && <section><div className="section-heading"><div><h2>স্টাডি ম্যাটেরিয়াল</h2><p className="muted">অনুমোদিত কোর্সের পাঠ্য উপকরণ।</p></div></div><CourseSelector courses={courses} enrollments={enrollments} value={selectedMaterialCourse} onChange={setSelectedMaterialCourse} /><MaterialList materials={materials} /></section>}
         {user.role === "STUDENT" && tab === "Exams" && <section>
           {examTaking ? <div className="panel exam-taking">
-            <div className="section-heading"><div><span className="eyebrow">EXAM IN PROGRESS</span><h2>{examTaking.title}</h2></div><span className="pill amber">সময়সীমা সার্ভার দ্বারা নিয়ন্ত্রিত</span></div>
-            {examTaking.questions.map((question, index) => <div className="take-question" key={index}><h3>{index + 1}. {question.prompt}<span>{question.marks} নম্বর</span></h3>{question.options.map((option, optionIndex) => <label className={`answer-option ${answers[index] === optionIndex ? "chosen" : ""}`} key={optionIndex}><input type="radio" name={`question-${index}`} checked={answers[index] === optionIndex} onChange={() => setAnswers(answers.map((answer, i) => i === index ? optionIndex : answer))} />{String.fromCharCode(65 + optionIndex)}. {option}</label>)}</div>)}
-            <button className="primary" onClick={submitExam}>পরীক্ষা জমা দিন</button>
+            <div className="exam-live-header"><div><span className="eyebrow">পরীক্ষা চলছে</span><h2>{examTaking.title}</h2></div><div className={`exam-countdown${remainingSeconds < 60 ? " urgent" : ""}`} role="timer" aria-live="polite"><small>সময় বাকি</small><strong>{String(Math.floor(remainingSeconds / 60)).padStart(2, "0")}:{String(remainingSeconds % 60).padStart(2, "0")}</strong></div></div>
+            <div className="exam-progress-bar"><span>{answers.filter((answer) => answer >= 0).length}/{answers.length} Answered</span><span>{answers.filter((answer) => answer < 0).length} বাকি</span><i><b style={{ width: `${answers.filter((answer) => answer >= 0).length / Math.max(answers.length, 1) * 100}%` }} /></i></div>
+            <nav className="question-nav" aria-label="প্রশ্ন নির্বাচন">{examTaking.questions.map((_, index) => <button key={index} type="button" className={`${index === currentQuestion ? "current" : ""}${answers[index] >= 0 ? " answered" : ""}`} aria-current={index === currentQuestion ? "step" : undefined} aria-label={`প্রশ্ন ${index + 1}${answers[index] >= 0 ? ", উত্তর দেওয়া হয়েছে" : ", উত্তর বাকি"}`} onClick={() => setCurrentQuestion(index)}>{index + 1}</button>)}</nav>
+            {(() => { const question = examTaking.questions[currentQuestion]; return <div className="take-question" key={currentQuestion}><h3>{currentQuestion + 1}. {question.prompt}<span>{question.marks} নম্বর</span></h3>{question.options.map((option, optionIndex) => <label className={`answer-option ${answers[currentQuestion] === optionIndex ? "chosen" : ""}`} key={optionIndex}><input type="radio" name={`question-${currentQuestion}`} checked={answers[currentQuestion] === optionIndex} onChange={() => setAnswers(answers.map((answer, answerIndex) => answerIndex === currentQuestion ? optionIndex : answer))} />{String.fromCharCode(65 + optionIndex)}. {option}</label>)}</div>; })()}
+            <div className="exam-navigation-actions"><button className="secondary" disabled={currentQuestion === 0} onClick={() => setCurrentQuestion((question) => Math.max(0, question - 1))}>← আগের প্রশ্ন</button><button className="secondary" disabled={currentQuestion === examTaking.questions.length - 1} onClick={() => setCurrentQuestion((question) => Math.min(examTaking.questions.length - 1, question + 1))}>পরের প্রশ্ন →</button><button className="primary" disabled={busy} onClick={submitExam}>পরীক্ষা জমা দিন</button></div>
           </div> : <>
             <div className="section-heading"><div><h2>MCQ পরীক্ষা</h2><p className="muted">প্রকাশিত পরীক্ষায় অংশ নিতে অনুমোদিত কোর্স নির্বাচন করুন।</p></div></div>
             <CourseSelector courses={courses} enrollments={enrollments} value={selectedMaterialCourse} onChange={setSelectedMaterialCourse} />
             {exams.map((exam) => <article className="exam-card" key={exam.id}>
               <div className="exam-icon">▣</div>
               <div className="exam-info"><strong>{exam.title}</strong><p>{exam.questionCount} প্রশ্ন · {exam.durationMinutes} মিনিট · Pass mark {exam.passMark}</p><small>পরীক্ষার সময়: {new Date(exam.startsAt).toLocaleString("bn-BD")} – {new Date(exam.endsAt).toLocaleString("bn-BD")}</small></div>
-              {exam.result ? <div className="student-result">
-                <div className="student-result-summary"><span className={`status ${exam.result.passed ? "approved" : "rejected"}`}>{exam.result.passed ? "উত্তীর্ণ" : "অনুত্তীর্ণ"}</span><strong>{exam.result.score}/{exam.result.totalMarks}</strong><span className="muted">{exam.result.correctCount}/{exam.questionCount} সঠিক</span></div>
-                <details className="exam-result-detail"><summary>ফলাফলের বিস্তারিত দেখুন</summary><p className="muted">জমা: {new Date(exam.result.submittedAt).toLocaleString("bn-BD")}</p><ExamAnswerDetails details={exam.result.details} /></details>
-              </div> : <button className="primary" onClick={() => startExam(exam)}>পরীক্ষা শুরু করুন →</button>}
+              <div className="student-result"><p className="exam-policy">মেধাতালিকা: {exam.leaderboardRule === "FIRST" ? "প্রথম প্রচেষ্টা" : exam.leaderboardRule === "LATEST" ? "সর্বশেষ প্রচেষ্টা" : "সর্বোচ্চ নম্বর"}{exam.negativeMarkingEnabled ? ` · ভুল উত্তরে -${exam.negativeMarks}` : " · নেগেটিভ মার্কিং নেই"}</p>{exam.results.length > 0 && <ExamAttemptHistory exam={exam} />}<button className="primary" onClick={() => startExam(exam)}>{exam.results.length ? "আবার পরীক্ষা দিন →" : "পরীক্ষা শুরু করুন →"}</button></div>
             </article>)}
             {selectedMaterialCourse && exams.length === 0 && <Empty text="এই কোর্সে এখন কোনো পরীক্ষা নেই।" />}
           </>}
@@ -420,7 +543,7 @@ export default function Dashboard() {
       </div>
     </main>
     {paymentCourse && <div className="modal-backdrop" onClick={() => setPaymentCourse(null)}><section className="modal" onClick={(event) => event.stopPropagation()}><div className="section-heading"><div><span className="eyebrow">ENROLLMENT REQUEST</span><h2>পেমেন্ট তথ্য জমা দিন</h2></div><button className="icon-button" onClick={() => setPaymentCourse(null)}>×</button></div><div className="payment-course"><strong>{paymentCourse.title}</strong><span>{money(paymentCourse.fee)}</span></div><p className="instruction">{paymentCourse.paymentInstructions}</p><form className="stack-form" onSubmit={(event) => submitForm(event, submitPayment)}><label>Payment Method<select name="paymentMethod"><option value="BKASH">bKash</option><option value="NAGAD">Nagad</option></select></label><label>Transaction ID<input name="transactionId" placeholder="যেমন: 8F72K9A1" required minLength={5} maxLength={40} /></label><label>Sender Mobile Number<input name="senderMobile" placeholder="01XXXXXXXXX" required /></label><p className="warning-note">এটি একটি UI-ভিত্তিক তথ্য জমা। এই ফর্মে প্রকৃত পেমেন্ট বা স্বয়ংক্রিয় যাচাই হচ্ছে না। Admin অনুমোদন না দেওয়া পর্যন্ত কোর্স আনলক হবে না।</p><button className="primary wide" disabled={busy}>পেমেন্ট রিকোয়েস্ট জমা দিন</button></form></section></div>}
-    {editingCourse && <div className="modal-backdrop" onClick={() => setEditingCourse(null)}><section className="modal" onClick={(event) => event.stopPropagation()}><div className="section-heading"><div><span className="eyebrow">COURSE MANAGEMENT</span><h2>কোর্স সম্পাদনা</h2></div><button className="icon-button" onClick={() => setEditingCourse(null)}>×</button></div><form className="stack-form" onSubmit={(event) => submitForm(event, saveCourse)}><label>কোর্সের নাম<input name="title" defaultValue={editingCourse.title} required /></label><label>বিবরণ<textarea name="description" rows={3} defaultValue={editingCourse.description} required /></label><label>কোর্স ফি (৳)<input name="fee" type="number" min="0" defaultValue={editingCourse.fee} required /></label><label>পেমেন্ট নির্দেশনা<textarea name="paymentInstructions" rows={2} defaultValue={editingCourse.paymentInstructions} required /></label><label className="check-label"><input type="checkbox" name="published" defaultChecked={editingCourse.published} /> কোর্স প্রকাশ করুন</label><button className="primary" disabled={busy}>পরিবর্তন সংরক্ষণ</button></form></section></div>}
+    {editingCourse && <div className="modal-backdrop" onClick={() => setEditingCourse(null)}><section className="modal" onClick={(event) => event.stopPropagation()}><div className="section-heading"><div><span className="eyebrow">COURSE MANAGEMENT</span><h2>কোর্স সম্পাদনা</h2></div><button className="icon-button" onClick={() => setEditingCourse(null)}>×</button></div><form className="stack-form" onSubmit={(event) => submitForm(event, saveCourse)}><label>কোর্সের নাম<input name="title" defaultValue={editingCourse.title} required /></label><label>বিবরণ<textarea name="description" rows={3} defaultValue={editingCourse.description} required /></label><label>কোর্স ফি (৳)<input name="fee" type="number" min="0" defaultValue={editingCourse.fee} required /></label><label>পেমেন্ট নির্দেশনা<textarea name="paymentInstructions" rows={2} defaultValue={editingCourse.paymentInstructions} required /></label><div className="edit-course-cover"><strong>কোর্সের কভার ছবি</strong>{(coverImagePreview || (!coverImageRemoved && coverImageUrl)) && <img src={coverImagePreview || coverImageUrl} alt="কোর্স কভার প্রিভিউ" />}<label className="cover-upload">ছবি নির্বাচন করুন<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void runAction(async () => { setCoverImageFile(await compressCourseImage(file)); setCoverImageRemoved(false); }); }} /></label>{(coverImageFile || coverImageUrl) && <button className="text-button danger-text" type="button" onClick={() => { setCoverImageFile(null); setCoverImageRemoved(true); }}>ছবি সরান</button>}<small>ছবির ফাইল MongoDB GridFS-এ থাকবে; course record-এ এর URL রাখা হবে।</small></div><label className="check-label"><input type="checkbox" name="published" defaultChecked={editingCourse.published} /> কোর্স প্রকাশ করুন</label><button className="primary" disabled={busy}>পরিবর্তন সংরক্ষণ</button></form></section></div>}
   </div>;
 }
 
@@ -430,6 +553,8 @@ function icon(label: string) {
 }
 
 function LandingPage({ courses, error, onLogin, onRegister }: { courses: Course[]; error: string; onLogin: () => void; onRegister: () => void }) {
+  const whatsappNumber = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER ?? "";
+  const whatsappDigits = whatsappNumber.replace(/\D/g, "");
   return <main className="landing-page">
     {error && <p className="landing-error" role="alert">{error}</p>}
     <header className="landing-header">
@@ -471,7 +596,7 @@ function LandingPage({ courses, error, onLogin, onRegister }: { courses: Course[
     <section className="landing-courses" id="courses">
       <div className="landing-section-heading landing-course-heading"><div><span className="eyebrow">আপনার পরবর্তী ধাপ</span><h2>জনপ্রিয় কোর্সসমূহ</h2><p>আপনার প্রস্তুতির সঙ্গে মানানসই কোর্সটি খুঁজে নিন।</p></div><button className="landing-text-link" onClick={onRegister}>সব কোর্স দেখুন →</button></div>
       {courses.length ? <div className="landing-course-grid">{courses.slice(0, 3).map((course, index) => <article className="landing-course-card" key={course._id}>
-        <div className={`landing-course-art landing-art-${index % 3}`}><span>EDUPREPX COURSE</span><strong>{["01", "02", "03"][index]}</strong></div>
+        <div className={`landing-course-art landing-art-${index % 3}`} style={course.coverImage ? { backgroundImage: `linear-gradient(rgba(14,32,28,.2),rgba(14,32,28,.2)),url("${course.coverImage}")` } : undefined}><span>EDUPREPX COURSE</span><strong>{["01", "02", "03"][index]}</strong></div>
         <div className="landing-course-copy"><span className="landing-course-tag">কোর্স</span><h3>{course.title}</h3><p>{course.description}</p><div><strong>৳{Number(course.fee).toLocaleString("bn-BD")}</strong><button onClick={onRegister}>বিস্তারিত <span>→</span></button></div></div>
       </article>)}</div> : <div className="landing-empty-courses"><span>▤</span><p>কোর্সগুলো শিগগিরই এখানে প্রকাশিত হবে।</p><button className="landing-text-link" onClick={onRegister}>শিক্ষার্থী অ্যাকাউন্ট তৈরি করুন →</button></div>}
     </section>
@@ -480,7 +605,7 @@ function LandingPage({ courses, error, onLogin, onRegister }: { courses: Course[
       <div className="landing-step-grid"><article><span>১</span><div><h3>অ্যাকাউন্ট খুলুন</h3><p>ইমেইল দিয়ে নিবন্ধন করে OTP যাচাই সম্পন্ন করুন।</p></div></article><article><span>২</span><div><h3>কোর্স বেছে নিন</h3><p>পছন্দের কোর্সে এনরোলমেন্ট ও পেমেন্ট তথ্য জমা দিন।</p></div></article><article><span>৩</span><div><h3>অনুমোদন পেয়ে শিখুন</h3><p>Admin অনুমোদনের পর কোর্সের উপকরণ ও পরীক্ষায় প্রবেশ করুন।</p></div></article></div>
     </section>
     <section className="landing-final-cta"><div><span className="eyebrow">আজই শুরু করুন</span><h2>আপনার সাফল্যের প্রস্তুতি<br />শুরু হোক এখান থেকে।</h2></div><button className="landing-cta" onClick={onRegister}>শিক্ষার্থী হিসেবে নিবন্ধন <span>→</span></button></section>
-    <footer className="landing-footer"><a className="brand" href="#home"><span className="brand-mark">E</span><span>EduPrepX</span></a><span>শিখুন • অনুশীলন করুন • এগিয়ে যান</span><span>© {new Date().getFullYear()} EduPrepX</span></footer>
+    <footer className="landing-footer"><a className="brand" href="#home"><span className="brand-mark">E</span><span>EduPrepX</span></a><span>শিখুন • অনুশীলন করুন • এগিয়ে যান</span>{whatsappDigits ? <a className="whatsapp-link" href={`https://wa.me/${whatsappDigits}`} target="_blank" rel="noreferrer">WhatsApp-এ যোগাযোগ · {whatsappNumber}</a> : <span className="whatsapp-link">WhatsApp যোগাযোগের নম্বর শিগগিরই যোগ হবে</span>}<span>© {new Date().getFullYear()} EduPrepX</span></footer>
   </main>;
 }
 
@@ -521,5 +646,10 @@ function ExamAnswerDetails({ details }: { details: ExamAnswerDetail[] }) {
       })}</div>
       {answer.chosenIndex === null && <p className="exam-unanswered">আপনি এই প্রশ্নের উত্তর দেননি।</p>}
       <small>প্রাপ্ত নম্বর: {answer.earnedMarks}/{answer.marks}</small>
+      {answer.explanation && <p className="answer-explanation"><strong>ব্যাখ্যা:</strong> {answer.explanation}</p>}
     </div>)}</div>;
+}
+
+function ExamAttemptHistory({ exam }: { exam: Exam }) {
+  return <div className="attempt-history"><strong>আপনার প্রচেষ্টার ইতিহাস ({exam.results.length})</strong>{exam.results.map((result) => <details className="exam-result-detail" key={result.attemptNumber}><summary><span>প্রচেষ্টা {result.attemptNumber} · র‍্যাংক {result.rank}/{result.rankTotal} · {result.score}/{result.totalMarks}</span><small>{new Date(result.submittedAt).toLocaleString("bn-BD")}</small></summary><div className="attempt-counts"><span>সঠিক {result.correctCount}</span><span>ভুল {result.wrongCount}</span><span>উত্তরহীন {result.unansweredCount}</span><span className={`status ${result.passed ? "approved" : "rejected"}`}>{result.passed ? "উত্তীর্ণ" : "অনুত্তীর্ণ"}</span></div><ExamAnswerDetails details={result.details} /></details>)}<details className="exam-result-detail leaderboard-detail"><summary>মেধাতালিকা দেখুন · {exam.leaderboardRule === "FIRST" ? "প্রথম প্রচেষ্টা" : exam.leaderboardRule === "LATEST" ? "সর্বশেষ প্রচেষ্টা" : "সর্বোচ্চ নম্বর"}</summary>{exam.leaderboard.length ? <ol className="leaderboard-list">{exam.leaderboard.map((entry) => <li key={`${entry.rank}-${entry.name}`}><span><b>{entry.rank}.</b> {entry.name}</span><strong>{entry.score}/{entry.totalMarks}</strong></li>)}</ol> : <p className="muted">এখনও কোনো ফলাফল নেই।</p>}</details></div>;
 }
