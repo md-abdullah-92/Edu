@@ -93,6 +93,7 @@ async function compressCourseImage(file: File): Promise<File> {
 }
 
 export default function Dashboard() {
+  const [initializing, setInitializing] = useState(true);
   const [user, setUser] = useState<User | null>(null);
   const [courses, setCourses] = useState<Course[]>([]);
   const [landingCourses, setLandingCourses] = useState<Course[]>([]);
@@ -119,6 +120,7 @@ export default function Dashboard() {
   const [examTaking, setExamTaking] = useState<{ id: string; attemptId: string; title: string; negativeMarkingEnabled: boolean; negativeMarks: number; questions: Array<{ prompt: string; options: string[]; marks: number }>; expiresAt: string } | null>(null);
   const [answers, setAnswers] = useState<number[]>([]);
   const [currentQuestion, setCurrentQuestion] = useState(0);
+  const examQuestionList = useRef<HTMLDivElement>(null);
   const [remainingSeconds, setRemainingSeconds] = useState(0);
   const submittingExam = useRef(false);
   const [materials, setMaterials] = useState<Material[]>([]);
@@ -128,8 +130,10 @@ export default function Dashboard() {
   const [exams, setExams] = useState<Exam[]>([]);
   const [adminStats, setAdminStats] = useState({ students: 0, pendingPayments: 0, courses: 0, exams: 0 });
   const [requests, setRequests] = useState<Enrollment[]>([]);
+  const [rejectionTarget, setRejectionTarget] = useState<Enrollment | null>(null);
   const [students, setStudents] = useState<Array<{ _id: string; name: string; email?: string; mobile?: string; active: boolean; createdAt: string; enrollments: number; results: number }>>([]);
   const [results, setResults] = useState<ResultRow[]>([]);
+  const [isSubmittingExam, setIsSubmittingExam] = useState(false);
 
   function blankQuestion(): Question {
     return { prompt: "", options: ["", "", "", ""], correctIndex: 0, marks: 1, explanation: "" };
@@ -182,8 +186,19 @@ export default function Dashboard() {
         setTab(current.role === "ADMIN" ? "Dashboard" : "Course Catalog");
         return loadBase(current);
       })
-      .catch((cause: Error) => setError(cause.message));
+      .catch((cause: Error) => setError(cause.message))
+      .finally(() => setInitializing(false));
   }, [loadBase]);
+
+  useEffect(() => {
+    if (!examTaking) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [examTaking]);
 
   useEffect(() => {
     if (!user || !((tab === "Exams" && user.role === "STUDENT") || (tab === "MCQ Exam Builder" && user.role === "ADMIN"))) return;
@@ -261,11 +276,15 @@ export default function Dashboard() {
   }
 
   async function signOut() {
-    if (!window.confirm("আপনি কি EduPrepX থেকে লগআউট করতে চান?")) return;
+    const confirmation = examTaking
+      ? "আপনি পরীক্ষা দিচ্ছেন। লগআউট করলে আপনার এই পরীক্ষার উত্তরগুলো হারিয়ে যাবে। লগআউট করবেন?"
+      : "আপনি কি EduPrepX থেকে লগআউট করতে চান?";
+    if (!window.confirm(confirmation)) return;
     try {
       await api("/api/auth/logout", { method: "POST" });
       setUser(null);
       setShowAuth(false);
+      setExamTaking(null);
       setCourses([]);
       setEnrollments([]);
       setMessage("আপনি সফলভাবে লগআউট করেছেন।");
@@ -289,13 +308,29 @@ export default function Dashboard() {
   }
 
   async function decidePayment(enrollment: Enrollment, status: "APPROVED" | "REJECTED") {
-    const rejectionReason = status === "REJECTED" ? window.prompt("প্রত্যাখ্যানের কারণ লিখুন")?.trim() : "";
-    if (status === "REJECTED" && !rejectionReason) return;
-    try {
-      await api(`/api/admin/payment-requests/${enrollment._id}`, { method: "PATCH", body: JSON.stringify({ status, rejectionReason }) });
-      setMessage(status === "APPROVED" ? "পেমেন্ট অনুমোদিত হয়েছে।" : "পেমেন্ট প্রত্যাখ্যান হয়েছে।");
+    if (status === "REJECTED") {
+      setError("");
+      setMessage("");
+      setRejectionTarget(enrollment);
+      return;
+    }
+    await runAction(async () => {
+      await api(`/api/admin/payment-requests/${enrollment._id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+      setMessage("পেমেন্ট অনুমোদিত হয়েছে।");
       await refresh();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "সিদ্ধান্ত সংরক্ষণ করা যায়নি।"); }
+    });
+  }
+
+  async function rejectPayment(form: FormData) {
+    if (!rejectionTarget) return;
+    const rejectionReason = String(form.get("rejectionReason") ?? "").trim();
+    await api(`/api/admin/payment-requests/${rejectionTarget._id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "REJECTED", rejectionReason })
+    });
+    setRejectionTarget(null);
+    setMessage("পেমেন্ট রিকোয়েস্ট প্রত্যাখ্যান হয়েছে। কারণটি শিক্ষার্থী দেখতে পাবেন।");
+    await refresh();
   }
 
   async function toggleStudent(student: typeof students[number]) {
@@ -435,9 +470,12 @@ export default function Dashboard() {
     } catch (cause) { setError(cause instanceof Error ? cause.message : "পরীক্ষা শুরু করা যায়নি।"); }
   }
 
-  async function submitExam() {
+  async function submitExam(autoSubmit = false) {
     if (!examTaking || submittingExam.current) return;
+    const unansweredCount = answers.filter((answer) => answer < 0).length;
+    if (!autoSubmit && unansweredCount > 0 && !window.confirm(`আপনি ${unansweredCount}টি প্রশ্নের উত্তর দেননি। ফাঁকা উত্তরসহ পরীক্ষা জমা দেবেন?`)) return;
     submittingExam.current = true;
+    setIsSubmittingExam(true);
     try {
       const data = await api<{ result: Omit<ExamSubmissionSummary, "title"> & { questionCount: number } }>(`/api/exams/${examTaking.id}/submit`, {
         method: "POST", body: JSON.stringify({ attemptId: examTaking.attemptId, answers })
@@ -453,6 +491,8 @@ export default function Dashboard() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "উত্তর জমা করা যায়নি।");
       submittingExam.current = false;
+    } finally {
+      setIsSubmittingExam(false);
     }
   }
 
@@ -461,16 +501,32 @@ export default function Dashboard() {
     const updateCountdown = () => {
       const seconds = Math.max(0, Math.ceil((new Date(examTaking.expiresAt).getTime() - Date.now()) / 1000));
       setRemainingSeconds(seconds);
-      if (seconds === 0) void submitExam();
+      if (seconds === 0) void submitExam(true);
     };
     updateCountdown();
     const interval = window.setInterval(updateCountdown, 1000);
     return () => window.clearInterval(interval);
   }, [examTaking, answers]);
 
+  useEffect(() => {
+    if (!examTaking || !examQuestionList.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      const visibleQuestion = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((left, right) => left.boundingClientRect.top - right.boundingClientRect.top)[0];
+      if (!visibleQuestion) return;
+      const index = Number((visibleQuestion.target as HTMLElement).dataset.questionIndex);
+      if (Number.isInteger(index)) setCurrentQuestion(index);
+    }, { rootMargin: "-145px 0px -55% 0px", threshold: 0.1 });
+    examQuestionList.current.querySelectorAll(".take-question").forEach((question) => observer.observe(question));
+    return () => observer.disconnect();
+  }, [examTaking]);
+
   const navItems = user?.role === "ADMIN"
     ? ["Dashboard", "Students", "Payment Requests", "Courses", "Study Materials", "MCQ Exam Builder", "Results"]
     : ["Course Catalog", "My Enrollments", "Study Materials", "Exams"];
+
+  if (initializing) return <main className="app-loading" role="status" aria-live="polite"><span className="brand-mark" aria-hidden="true">E</span><strong>EduPrepX</strong><span>আপনার অ্যাকাউন্ট লোড হচ্ছে…</span><i /></main>;
 
   if (!user) {
     if (!showAuth) return <LandingPage
@@ -484,13 +540,13 @@ export default function Dashboard() {
       <div className="auth-main"><div className="auth-card"><div className="mobile-brand"><span className="brand-mark">E</span> EduPrepX</div><span className="eyebrow">EDUPREPX PORTAL</span><h2>{authTab === "login" ? "আপনার অ্যাকাউন্টে প্রবেশ করুন" : pendingEmail ? "আপনার ইমেইল যাচাই করুন" : "শিক্ষার্থী অ্যাকাউন্ট তৈরি করুন"}</h2><p className="muted">কোর্স, শেখার উপকরণ ও অনলাইন পরীক্ষায় অংশ নিতে EduPrepX-এ প্রবেশ করুন।</p>
         <button className="landing-back mobile-auth-back" onClick={() => setShowAuth(false)}>← হোমপেজে ফিরে যান</button>
         <div className="auth-tabs" role="tablist" aria-label="অ্যাকাউন্ট">
-          <button type="button" role="tab" aria-selected={authTab === "login"} className={authTab === "login" ? "active" : ""} onClick={() => setAuthTab("login")}>Login</button>
-          <button type="button" role="tab" aria-selected={authTab === "register"} className={authTab === "register" ? "active" : ""} onClick={() => setAuthTab("register")}>Student Registration</button>
+          <button type="button" role="tab" aria-selected={authTab === "login"} className={authTab === "login" ? "active" : ""} disabled={busy} onClick={() => setAuthTab("login")}>লগইন</button>
+          <button type="button" role="tab" aria-selected={authTab === "register"} className={authTab === "register" ? "active" : ""} disabled={busy} onClick={() => setAuthTab("register")}>শিক্ষার্থী নিবন্ধন</button>
         </div>
         {authTab === "login" ? <form onSubmit={(event) => submitForm(event, handleAuth)} className="stack-form" role="tabpanel">
           <label>Email address<input name="email" type="email" placeholder="you@example.com" autoComplete="email" required /></label>
           <label>Password<input name="password" type="password" placeholder="আপনার পাসওয়ার্ড" autoComplete="current-password" required /></label>
-          <button className="primary wide" disabled={busy}>{busy ? "অপেক্ষা করুন..." : "Login করুন"} <span>→</span></button>
+          <button className="primary wide" disabled={busy}>{busy ? "অপেক্ষা করুন..." : "লগইন করুন"} <span>→</span></button>
         </form> : pendingEmail ? <form id="register-form" onSubmit={(event) => submitForm(event, verifyRegistration)} className="stack-form" role="tabpanel">
           <p className="muted">আমরা <strong>{pendingEmail}</strong>-এ ৬ সংখ্যার যাচাই কোড পাঠিয়েছি। কোডটি ১০ মিনিট বৈধ থাকবে।</p>
           <label>ইমেইল যাচাই কোড<input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} placeholder="৬ সংখ্যার OTP" required /></label>
@@ -503,28 +559,35 @@ export default function Dashboard() {
           <label>পাসওয়ার্ড<input name="password" type="password" minLength={8} autoComplete="new-password" placeholder="অন্তত ৮ অক্ষর" required /></label>
           <button className="secondary wide" disabled={busy}>OTP দিয়ে শিক্ষার্থী অ্যাকাউন্ট তৈরি করুন</button>
         </form>}
-        {error && <p className="alert error">{error}</p>}{message && <p className="alert success">{message}</p>}
+        {error && <p className="alert error" role="alert" aria-live="assertive">{error}</p>}{message && <p className="alert success" role="status" aria-live="polite">{message}</p>}
       </div></div>
     </main>;
   }
 
-  const title = tab;
+  const title = navigationLabel(tab);
   const paymentCourseName = (enrollment: Enrollment) => typeof enrollment.course === "object" ? enrollment.course.title : "";
 
   return <div className="app-shell">
     <aside className="sidebar">
       <a className="brand" href="#"><span className="brand-mark">E</span><span>EduPrepX<small>LEARNING PORTAL</small></span></a>
       <div className="side-label">WORKSPACE</div>
-      <nav>{navItems.map((item) => <button key={item} onClick={() => { setTab(item); setExamTaking(null); }} className={`nav-item ${tab === item ? "selected" : ""}`}><span className="nav-icon">{icon(item)}</span>{item}{item === "Payment Requests" && adminStats.pendingPayments > 0 && <span className="nav-count">{adminStats.pendingPayments}</span>}</button>)}</nav>
+      <nav>{navItems.map((item) => <button key={item} onClick={() => {
+        if (item === tab) return;
+        if (examTaking && !window.confirm("এই পরীক্ষার উত্তরগুলো জমা হয়নি। পৃষ্ঠা ছাড়লে আপনার বাছাই করা উত্তর হারিয়ে যাবে। তবু পৃষ্ঠা ছাড়বেন?")) return;
+        setTab(item);
+        setExamTaking(null);
+      }} className={`nav-item ${tab === item ? "selected" : ""}`} aria-current={tab === item ? "page" : undefined}><span className="nav-icon">{icon(item)}</span>{navigationLabel(item)}{item === "Payment Requests" && adminStats.pendingPayments > 0 && <span className="nav-count">{adminStats.pendingPayments}</span>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="support-box"><span className="support-icon">✦</span><strong>কোনো সাহায্য দরকার?</strong><p>পেমেন্ট বা কোর্স নিয়ে সহায়তা নিন।</p>{user.role === "STUDENT" ? <a href={`https://wa.me/${whatsappDigits}`} target="_blank" rel="noreferrer">WhatsApp-এ যোগাযোগ · {whatsappNumber} →</a> : <a href="mailto:support@eduprepx.com">সহায়তা কেন্দ্রে যোগাযোগ →</a>}</div><div className="user-mini"><span className="avatar">{user.name.slice(0, 1).toUpperCase()}</span><div><strong>{user.name}</strong><small>{user.role === "ADMIN" ? "Administrator" : "Student"}</small></div></div></div>
     </aside>
     <main className="main-area">
-      <header className="topbar"><div><span className="breadcrumb">EduPrepX <span>/</span> {title}</span><h1>{title}</h1></div><div className="top-actions"><span className="today">{new Date().toLocaleDateString("bn-BD", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</span><button className="notification" title="Notifications">♧<i /></button><span className="avatar">{user.name.slice(0, 1).toUpperCase()}</span><button className="logout-button" onClick={signOut}><span aria-hidden="true">↪</span><span>Log out</span></button></div></header>
+      <header className="topbar"><div><span className="breadcrumb">EduPrepX <span>/</span> {title}</span><h1>{title}</h1></div><div className="top-actions"><span className="today">{new Date().toLocaleDateString("bn-BD", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</span>{user.role === "ADMIN" && adminStats.pendingPayments > 0 && <button className="notification" title={`${adminStats.pendingPayments}টি পেমেন্ট রিকোয়েস্ট অপেক্ষায়`} aria-label={`${adminStats.pendingPayments}টি পেমেন্ট রিকোয়েস্ট পর্যালোচনা করুন`} onClick={() => setTab("Payment Requests")}>৳<i /></button>}<span className="avatar" aria-label={user.name}>{user.name.slice(0, 1).toUpperCase()}</span><button className="logout-button" onClick={signOut}><span aria-hidden="true">↪</span><span>লগআউট</span></button></div></header>
       <div className="content">
+        {user.role === "STUDENT" && <a className="mobile-support-link" href={`https://wa.me/${whatsappDigits}`} target="_blank" rel="noopener noreferrer"><span className="mobile-support-icon" aria-hidden="true">↗</span><span><strong>সাহায্য দরকার?</strong><small>WhatsApp-এ যোগাযোগ · {whatsappNumber}</small></span><b aria-hidden="true">→</b></a>}
+        {user.role === "ADMIN" && tab === "Results" ? <AdminResultsPanel results={results} onRefresh={refresh} /> : <>
         {user.role === "ADMIN" && tab === "Courses" && !editingCourse && <div className="panel course-cover-editor"><div><strong>কোর্সের কভার ছবি</strong><p className="muted">JPEG, PNG বা WebP · সর্বোচ্চ ৫ MB; ছবির ফাইল MongoDB GridFS-এ থাকবে।</p></div><label className="cover-upload">ছবি নির্বাচন করুন<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void runAction(async () => { setCoverImageFile(await compressCourseImage(file)); setCoverImageRemoved(false); }); }} /></label>{coverImagePreview && <><img src={coverImagePreview} alt="কোর্স কভার প্রিভিউ" /><button className="text-button danger-text" type="button" onClick={() => setCoverImageFile(null)}>ছবি সরান</button></>}</div>}
         {user.role === "ADMIN" && tab === "MCQ Exam Builder" && examCourse && <div className="panel exam-authoring-settings"><h3>পরীক্ষার নম্বর ও ব্যাখ্যা</h3><div className="exam-settings-grid"><label className="check-label"><input type="checkbox" checked={negativeMarkingEnabled} onChange={(event) => setNegativeMarkingEnabled(event.target.checked)} /> ভুল উত্তরে নম্বর কাটুন</label><label>প্রতি ভুল উত্তরে কর্তন<input type="number" min="0" step="0.01" value={negativeMarks} disabled={!negativeMarkingEnabled} onChange={(event) => setNegativeMarks(Number(event.target.value))} /></label><label>মেধাতালিকার নিয়ম<select value={leaderboardRule} onChange={(event) => setLeaderboardRule(event.target.value as typeof leaderboardRule)}><option value="FIRST">প্রথম প্রচেষ্টা</option><option value="HIGHEST">সর্বোচ্চ নম্বর</option><option value="LATEST">সর্বশেষ প্রচেষ্টা</option></select></label></div></div>}
-        {message && <div className="alert success dismissible">{message}<button onClick={() => setMessage("")}>×</button></div>}
-        {error && <div className="alert error dismissible">{error}<button onClick={() => setError("")}>×</button></div>}
+        {message && <div className="alert success dismissible" role="status" aria-live="polite">{message}<button aria-label="বার্তা বন্ধ করুন" onClick={() => setMessage("")}>×</button></div>}
+        {error && !rejectionTarget && <div className="alert error dismissible" role="alert" aria-live="assertive">{error}<button aria-label="ত্রুটির বার্তা বন্ধ করুন" onClick={() => setError("")}>×</button></div>}
         {user.role === "STUDENT" && tab === "Exams" && examSubmissionSummary && <section className={`exam-submission-summary ${examSubmissionSummary.passed ? "passed" : "not-passed"}`} aria-label="পরীক্ষার ফলাফল">
           <div className="exam-submission-heading">
             <div><span className="eyebrow">পরীক্ষার ফলাফল</span><h2>{examSubmissionSummary.title}</h2><p>{examSubmissionSummary.passed ? "অভিনন্দন, আপনি পাস করেছেন!" : "এবার পাস করা হয়নি—প্রস্তুতি নিয়ে আবার চেষ্টা করুন।"}</p></div>
@@ -534,62 +597,165 @@ export default function Dashboard() {
           <div className="exam-submission-metrics">
             <div><span>সঠিক উত্তরের নম্বর</span><strong>{formatMarks(examSubmissionSummary.correctMarks)}</strong></div>
             <div><span>নেগেটিভ কাটা</span><strong className={examSubmissionSummary.negativeMarksDeducted ? "deducted-marks" : ""}>{formatMarks(examSubmissionSummary.negativeMarksDeducted)}{examSubmissionSummary.scoreFloorApplied && <small> সর্বনিম্ন ০</small>}</strong></div>
-            <div><span>মেধাস্থান</span><strong>{examSubmissionSummary.rank}<small> / {examSubmissionSummary.rankTotal}</small></strong></div>
+            <div className="exam-rank-metric"><div><span>Your position</span><strong>{examSubmissionSummary.rank.toLocaleString("en-US")}</strong></div><div><span>Total participants</span><strong>{examSubmissionSummary.rankTotal.toLocaleString("en-US")}</strong></div></div>
             <div><span>সঠিক · ভুল · বাদ</span><strong>{examSubmissionSummary.correctCount} · {examSubmissionSummary.wrongCount} · {examSubmissionSummary.unansweredCount}</strong></div>
           </div>
         </section>}
         {user.role === "ADMIN" && tab === "Dashboard" && <section>
-          <div className="welcome-row"><div><span className="eyebrow">OVERVIEW</span><h2>শুভেচ্ছা, {user.name.split(" ")[0]} 👋</h2><p className="muted">আপনার প্ল্যাটফর্মের আজকের সারসংক্ষেপ।</p></div><button className="secondary" onClick={refresh}>↻ &nbsp;Refresh data</button></div>
+          <div className="welcome-row"><div><span className="eyebrow">সারসংক্ষেপ</span><h2>শুভেচ্ছা, {user.name.split(" ")[0]} 👋</h2><p className="muted">আপনার প্ল্যাটফর্মের আজকের সারসংক্ষেপ।</p></div><button className="secondary" onClick={refresh}>↻ &nbsp;তথ্য হালনাগাদ</button></div>
           <div className="stat-grid">{[
-            ["Total Students", adminStats.students, "♧", "সক্রিয় শিক্ষার্থী অ্যাকাউন্ট"],
-            ["Pending Payments", adminStats.pendingPayments, "৳", "যাচাইয়ের জন্য অপেক্ষায়"],
-            ["Total Courses", adminStats.courses, "▤", "প্রকাশিত ও খসড়া কোর্স"],
-            ["MCQ Exams", adminStats.exams, "▣", "তৈরি করা পরীক্ষা"]
+            ["মোট শিক্ষার্থী", adminStats.students, "♧", "সক্রিয় শিক্ষার্থী অ্যাকাউন্ট"],
+            ["অপেক্ষমাণ পেমেন্ট", adminStats.pendingPayments, "৳", "যাচাইয়ের জন্য অপেক্ষায়"],
+            ["মোট কোর্স", adminStats.courses, "▤", "প্রকাশিত ও খসড়া কোর্স"],
+            ["MCQ পরীক্ষা", adminStats.exams, "▣", "তৈরি করা পরীক্ষা"]
           ].map(([label, value, ico, caption], index) => <div className="stat-card" key={label}><div className={`stat-icon tone-${index}`}>{ico}</div><div className="stat-caption">{caption}</div><div className="stat-value">{Number(value).toLocaleString("bn-BD")}</div><div className="stat-label">{label}</div></div>)}</div>
           <div className="section-heading"><div><h3>সাম্প্রতিক পেমেন্ট</h3><p className="muted">সর্বশেষ পেমেন্ট রিকোয়েস্টের অবস্থা</p></div><button className="text-button" onClick={() => setTab("Payment Requests")}>সব দেখুন →</button></div>
           <PaymentTable requests={requests.slice(0, 5)} decide={decidePayment} isAdmin />
           <p className="demo-note">Dashboard-এর সংখ্যা ডাটাবেস থেকে আসছে; এগুলো নমুনা বা Demo সংখ্যা নয়।</p>
         </section>}
-        {user.role === "ADMIN" && tab === "Students" && <section><div className="section-heading"><div><h2>শিক্ষার্থী পরিচালনা</h2><p className="muted">নিবন্ধিত শিক্ষার্থীদের অ্যাকাউন্ট ও কার্যক্রম</p></div><span className="pill">{students.length} জন</span></div><div className="table-wrap"><table><thead><tr><th>শিক্ষার্থী</th><th>ইমেইল</th><th>এনরোলমেন্ট</th><th>পরীক্ষার ফল</th><th>অ্যাকাউন্ট</th><th>যোগদানের তারিখ</th><th>পরিচালনা</th></tr></thead><tbody>{students.map((student) => <tr key={student._id}><td><div className="person"><span className="avatar small">{student.name.slice(0, 1)}</span><strong>{student.name}</strong></div></td><td>{student.email ?? student.mobile ?? "—"}</td><td>{student.enrollments}</td><td>{student.results}</td><td><span className={`status ${student.active ? "approved" : "rejected"}`}>{student.active ? "ACTIVE" : "INACTIVE"}</span></td><td>{new Date(student.createdAt).toLocaleDateString("bn-BD")}</td><td><button className={student.active ? "reject-button" : "approve-button"} onClick={() => toggleStudent(student)}>{student.active ? "Deactivate" : "Activate"}</button></td></tr>)}</tbody></table>{students.length === 0 && <Empty text="কোনো শিক্ষার্থী নেই।" />}</div></section>}
+        {user.role === "ADMIN" && tab === "Students" && <section><div className="section-heading"><div><h2>শিক্ষার্থী পরিচালনা</h2><p className="muted">নিবন্ধিত শিক্ষার্থীদের অ্যাকাউন্ট ও কার্যক্রম</p></div><span className="pill">{students.length} জন</span></div><div className="table-wrap admin-mobile-cards"><table><thead><tr><th>শিক্ষার্থী</th><th>ইমেইল</th><th>এনরোলমেন্ট</th><th>পরীক্ষার ফল</th><th>অ্যাকাউন্ট</th><th>যোগদানের তারিখ</th><th>পরিচালনা</th></tr></thead><tbody>{students.map((student) => <tr key={student._id}><td data-label="শিক্ষার্থী"><div className="person"><span className="avatar small">{student.name.slice(0, 1)}</span><strong>{student.name}</strong></div></td><td data-label="ইমেইল">{student.email ?? student.mobile ?? "—"}</td><td data-label="এনরোলমেন্ট">{student.enrollments}</td><td data-label="পরীক্ষার ফল">{student.results}</td><td data-label="অ্যাকাউন্ট"><span className={`status ${student.active ? "approved" : "rejected"}`}>{student.active ? "সক্রিয়" : "নিষ্ক্রিয়"}</span></td><td data-label="যোগদানের তারিখ">{new Date(student.createdAt).toLocaleDateString("bn-BD")}</td><td data-label="পরিচালনা"><button className={student.active ? "reject-button" : "approve-button"} onClick={() => toggleStudent(student)}>{student.active ? "নিষ্ক্রিয় করুন" : "সক্রিয় করুন"}</button></td></tr>)}</tbody></table>{students.length === 0 && <Empty text="কোনো শিক্ষার্থী নেই।" />}</div></section>}
         {user.role === "ADMIN" && tab === "Payment Requests" && <section><div className="section-heading"><div><h2>পেমেন্ট রিকোয়েস্ট</h2><p className="muted">Transaction ID এবং পেমেন্টের তথ্য ম্যানুয়ালি যাচাই করুন।</p></div><span className="pill amber">{requests.filter((request) => request.status === "PENDING").length} Pending</span></div><PaymentTable requests={requests} decide={decidePayment} isAdmin /></section>}
         {user.role === "ADMIN" && tab === "Courses" && <section><div className="section-heading"><div><h2>কোর্স পরিচালনা</h2><p className="muted">কোর্স তৈরি করুন, ফি ও পেমেন্ট নির্দেশনা নির্ধারণ করুন।</p></div></div><div className="two-panel"><form className="panel stack-form" onSubmit={(event) => submitForm(event, createCourse)}><h3>নতুন কোর্স তৈরি</h3><label>কোর্সের নাম<input name="title" placeholder="যেমন: BCS Preliminary Preparation" required /></label><label>কোর্সের বিবরণ<textarea name="description" rows={3} required /></label><label>কোর্স ফি (৳)<input name="fee" type="number" min="0" step="1" required /></label><label>পেমেন্ট নির্দেশনা<textarea name="paymentInstructions" rows={2} placeholder="Merchant নম্বর ও পেমেন্টের নির্দেশনা লিখুন" required /></label><label className="check-label"><input type="checkbox" name="published" /> তৈরি করেই প্রকাশ করুন</label><button className="primary" disabled={busy}>কোর্স তৈরি করুন</button></form><div className="panel"><h3>সকল কোর্স <span className="pill">{courses.length}</span></h3>{courses.map((course) => <div className="course-admin" key={course._id}><div><strong>{course.title}</strong><p className="muted">{money(course.fee)} · {course.description}</p></div><div className="action-row"><button className="small-button" onClick={() => setEditingCourse(course)}>Edit</button><button className={course.published ? "small-button" : "small-button primary-small"} onClick={() => updateCourse(course, !course.published)}>{course.published ? "প্রকাশিত" : "প্রকাশ করুন"}</button><button className="small-button delete-course-button" onClick={() => void runAction(() => deleteCourse(course))}>মুছুন</button></div></div>)}{!courses.length && <Empty text="এখনও কোনো কোর্স তৈরি হয়নি।" />}</div></div></section>}
         {user.role === "ADMIN" && tab === "Study Materials" && <section><div className="section-heading"><div><h2>স্টাডি ম্যাটেরিয়াল</h2><p className="muted">PDF MongoDB GridFS-এ রাখুন; নোট/লিংকের URL সরাসরি যোগ করুন।</p></div></div><div className="two-panel"><form className="panel stack-form" onSubmit={(event) => submitForm(event, createMaterial)}><h3>নতুন উপকরণ যোগ করুন</h3><label>কোর্স<select name="courseId" required defaultValue=""><option value="" disabled>কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select></label><label>শিরোনাম<input name="title" required /></label><label>ধরন<select value={materialKind} onChange={(event) => setMaterialKind(event.target.value)}><option value="PDF">PDF ফাইল</option><option value="NOTE">Note URL</option><option value="LINK">External link</option></select></label>{materialKind === "PDF" ? <label>PDF ফাইল · সর্বোচ্চ ২০ MB<input ref={materialFileInput} name="file" type="file" accept="application/pdf,.pdf" required /></label> : <label>ফাইল/কনটেন্ট URL<input name="url" type="url" placeholder="https://..." required /></label>}<label>বিবরণ<textarea name="description" rows={2} /></label><button className="primary" disabled={busy}>উপকরণ যোগ করুন</button></form><div className="panel"><h3>কোর্সের উপকরণ দেখুন</h3><select value={selectedMaterialCourse} onChange={(event) => setSelectedMaterialCourse(event.target.value)}><option value="">কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select><MaterialList materials={materials} /></div></div></section>}
         {user.role === "ADMIN" && tab === "MCQ Exam Builder" && <section><div className="section-heading"><div><h2>MCQ Exam Builder</h2><p className="muted">সঠিক উত্তর সার্ভার-সাইডে সংরক্ষিত হবে, পরীক্ষার্থীর কাছে যাবে না।</p></div><button className="primary" onClick={() => setExamCourse(courses[0] ?? null)}>＋ নতুন পরীক্ষা</button></div>{examCourse && <form className="panel exam-builder stack-form" onSubmit={(event) => submitForm(event, createExam)}><div className="section-heading"><h3>পরীক্ষার তথ্য</h3><button type="button" className="icon-button" onClick={() => setExamCourse(null)}>×</button></div><label>কোর্স<select value={examCourse._id} onChange={(event) => setExamCourse(courses.find((course) => course._id === event.target.value) ?? null)}>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select></label><label>পরীক্ষার শিরোনাম<input name="title" placeholder="যেমন: Data Structure — Weekly Quiz" required /></label><div className="three-col"><label>সময় (মিনিট)<input name="durationMinutes" type="number" min="1" max="360" defaultValue="30" required /></label><label>Pass mark<input name="passMark" type="number" min="0" step="0.5" defaultValue="5" required /></label><label>শুরু হবে<input name="startsAt" type="datetime-local" required /></label></div><label>শেষ হবে<input name="endsAt" type="datetime-local" required /></label><div className="builder-heading"><h3>প্রশ্ন ও উত্তর</h3><span className="muted">প্রতি প্রশ্নে ঠিক ৪টি অপশন</span></div>        {examQuestions.map((question, index) => <div className="question-editor" key={index}><div className="question-title"><strong>প্রশ্ন {index + 1}</strong>{examQuestions.length > 1 && <button type="button" className="text-button danger-text" onClick={() => setExamQuestions(examQuestions.filter((_, i) => i !== index))}>মুছুন</button>}</div><label>প্রশ্ন<input value={question.prompt} onChange={(event) => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, prompt: event.target.value } : q))} required /></label><div className="options-grid">{question.options.map((option, optionIndex) => <label key={optionIndex}>Option {String.fromCharCode(65 + optionIndex)}<div className="option-input"><input value={option} onChange={(event) => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, options: q.options.map((value, n) => n === optionIndex ? event.target.value : value) } : q))} required /><input aria-label={`Option ${optionIndex + 1} সঠিক উত্তর`} type="radio" checked={question.correctIndex === optionIndex} onChange={() => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, correctIndex: optionIndex } : q))} /></div></label>)}</div><label>ব্যাখ্যা<textarea rows={2} maxLength={2000} value={question.explanation} onChange={(event) => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, explanation: event.target.value } : q))} placeholder="সঠিক উত্তরের কারণ লিখুন" /></label><label className="marks-input">Marks per question<input type="number" min="0.1" step="0.1" value={question.marks} onChange={(event) => setExamQuestions(examQuestions.map((q, i) => i === index ? { ...q, marks: Number(event.target.value) } : q))} required /></label></div>)}<button type="button" className="secondary" onClick={() => setExamQuestions([...examQuestions, blankQuestion()])}>＋ আরেকটি প্রশ্ন যোগ করুন</button><div className="builder-footer"><span>মোট নম্বর: <strong>{formatMarks(examQuestions.reduce((sum, q) => sum + Number(q.marks || 0), 0))}</strong></span><button className="primary" disabled={busy}>পরীক্ষা তৈরি করুন</button></div></form>}<div className="panel"><h3>কোর্স বেছে নিয়ে পরীক্ষার তালিকা</h3><select value={selectedMaterialCourse} onChange={(event) => setSelectedMaterialCourse(event.target.value)}><option value="">কোর্স নির্বাচন করুন</option>{courses.map((course) => <option key={course._id} value={course._id}>{course.title}</option>)}</select>{exams.map((exam) => <div className="course-admin" key={exam.id}><div><strong>{exam.title}</strong><p className="muted">{exam.questionCount} প্রশ্ন · {exam.durationMinutes} মিনিট · Pass mark {exam.passMark}</p></div><span className="status approved">READY</span></div>)}</div></section>}                        {user.role === "ADMIN" && tab === "Results" && <section><div className="section-heading"><div><h2>পরীক্ষার ফলাফল</h2><p className="muted">শিক্ষার্থীর প্রতিটি প্রচেষ্টার নম্বর, উত্তর ও মেধাস্থান</p></div></div><div className="results-list">{results.map((result) => <details className="result-card" key={result.id}><summary><div className="result-summary"><span className="avatar small">{result.student.name.slice(0, 1)}</span><div><strong>{result.student.name} · {result.exam.title} · প্রচেষ্টা {result.attemptNumber}</strong><small>{result.student.email ?? result.student.mobile} · {new Date(result.submittedAt).toLocaleString("bn-BD")}</small></div></div><span className={`status ${result.passed ? "approved" : "rejected"}`}>{formatMarks(result.score)}/{formatMarks(result.totalMarks)} · {result.passed ? "PASS" : "FAIL"} · মেধাস্থান {result.rank}/{result.rankTotal}</span></summary><div className="attempt-counts"><span>সঠিক নম্বর {formatMarks(result.correctMarks)}</span><span>নেগেটিভ কাটা {formatMarks(result.negativeMarksDeducted)}{result.scoreFloorApplied ? " (সর্বনিম্ন ০)" : ""}</span><span>প্রাপ্ত নম্বর {formatMarks(result.score)}/{formatMarks(result.totalMarks)}</span><span>সঠিক {result.correctCount}</span><span>ভুল {result.wrongCount}</span><span>উত্তরহীন {result.unansweredCount}</span></div><div className="answer-review">{result.details.map((answer, i) => <div key={i}><strong>{i + 1}. {answer.prompt}</strong><p className={answer.isCorrect ? "correct-answer" : "wrong-answer"}>শিক্ষার্থীর উত্তর: {answer.chosen} {answer.isCorrect ? "✓" : "✗"} · প্রাপ্ত {formatMarks(answer.earnedMarks)}/{formatMarks(answer.marks)}</p>{!answer.isCorrect && <p className="correct-answer">সঠিক উত্তর: {answer.correct}</p>}{answer.explanation && <p className="answer-explanation"><strong>ব্যাখ্যা:</strong> {answer.explanation}</p>}</div>)}</div></details>)}{!results.length && <Empty text="এখনও পরীক্ষার ফল নেই।" />}</div></section>}
 
-        {user.role === "STUDENT" && tab === "Course Catalog" && <section><div className="welcome-row"><div><span className="eyebrow">DISCOVER</span><h2>আপনার পরবর্তী কোর্সটি খুঁজুন</h2><p className="muted">পছন্দের কোর্স বেছে নিয়ে এনরোলমেন্ট রিকোয়েস্ট করুন।</p></div></div><div className="course-grid">{courses.map((course, index) => {
+        {user.role === "STUDENT" && tab === "Course Catalog" && <section><div className="welcome-row"><div><span className="eyebrow">আপনার শেখার যাত্রা</span><h2>আপনার পরবর্তী কোর্সটি খুঁজুন</h2><p className="muted">পছন্দের কোর্স বেছে নিয়ে এনরোলমেন্ট রিকোয়েস্ট করুন।</p></div></div><div className="course-grid">{courses.map((course, index) => {
           const enrollment = enrollments.find((item) => typeof item.course === "object" && "_id" in item.course && item.course._id === course._id);
-          return <article className="course-card" key={course._id}><div className={`course-art art-${index % 4}`} style={course.coverImage ? { backgroundImage: `linear-gradient(rgba(14,32,28,.2),rgba(14,32,28,.2)),url("${course.coverImage}")` } : undefined}><span>COURSE</span><span className="art-symbol">{["◈", "▤", "⌘", "✦"][index % 4]}</span></div><div className="course-card-content"><div className="course-meta"><span>EDUPREPX PROGRAM</span><strong>{money(course.fee)}</strong></div><h3>{course.title}</h3><p>{course.description}</p><div className="course-card-footer">{enrollment ? <StatusPill status={enrollment.status} /> : <button className="primary" onClick={() => setPaymentCourse(course)}>Enroll now <span>→</span></button>}<span className="course-link">↗</span></div></div></article>;
+          return <article className="course-card" key={course._id}><div className={`course-art art-${index % 4}`} style={course.coverImage ? { backgroundImage: `linear-gradient(rgba(14,32,28,.2),rgba(14,32,28,.2)),url("${course.coverImage}")` } : undefined}><span>আপনার কোর্স</span><span className="art-symbol">{["◈", "▤", "⌘", "✦"][index % 4]}</span></div><div className="course-card-content"><div className="course-meta"><span>কোর্স ফি</span><strong>{money(course.fee)}</strong></div><h3>{course.title}</h3><p>{course.description}</p><div className="course-card-footer">{enrollment ? <StatusPill status={enrollment.status} /> : <button className="primary" onClick={() => setPaymentCourse(course)}>কোর্সে ভর্তি হন <span>→</span></button>}<span className="course-link" aria-hidden="true">↗</span></div></div></article>;
         })}{!courses.length && <Empty text="এখনও কোনো কোর্স প্রকাশিত হয়নি।" />}</div></section>}
-        {user.role === "STUDENT" && tab === "My Enrollments" && <section><div className="section-heading"><div><h2>আমার এনরোলমেন্ট</h2><p className="muted">পেমেন্ট যাচাই ও কোর্স অ্যাক্সেসের অবস্থা।</p></div></div><div className="panel table-wrap"><table><thead><tr><th>কোর্স</th><th>Transaction ID</th><th>পেমেন্ট</th><th>অবস্থা</th><th>বিবরণ</th></tr></thead><tbody>{enrollments.map((item) => <tr key={item._id}><td><strong>{paymentCourseName(item)}</strong></td><td className="mono">{item.transactionId}</td><td>{item.paymentMethod} · {item.senderMobile}</td><td><StatusPill status={item.status} /></td><td>{item.status === "REJECTED" ? item.rejectionReason : item.status === "APPROVED" ? "কোর্স অ্যাক্সেস চালু" : "Admin যাচাই করছেন"}</td></tr>)}</tbody>{!enrollments.length && <></>}</table>{!enrollments.length && <Empty text="আপনি এখনও কোনো কোর্সে এনরোল করেননি।" />}</div></section>}
+        {user.role === "STUDENT" && tab === "My Enrollments" && <section><div className="section-heading"><div><h2>আমার এনরোলমেন্ট</h2><p className="muted">পেমেন্ট যাচাই ও কোর্স অ্যাক্সেসের অবস্থা।</p></div></div><div className="enrollment-grid">{enrollments.map((item, index) => <article className={`enrollment-card enrollment-tone-${index % 4}`} key={item._id}><div className="enrollment-card-heading"><span className="enrollment-course-icon" aria-hidden="true">▤</span><div><small>কোর্স</small><h3>{paymentCourseName(item)}</h3></div><StatusPill status={item.status} /></div><div className="enrollment-card-details"><div><span>Transaction ID</span><strong className="mono">{item.transactionId}</strong></div><div><span>পেমেন্ট মাধ্যম</span><strong>{item.paymentMethod === "BKASH" ? "বিকাশ" : item.paymentMethod === "NAGAD" ? "নগদ" : item.paymentMethod}</strong></div><div><span>প্রেরকের নম্বর</span><strong>{item.senderMobile}</strong></div></div><p className={`enrollment-note ${item.status === "REJECTED" ? "rejected" : item.status === "APPROVED" ? "approved" : "pending"}`}>{item.status === "REJECTED" ? item.rejectionReason || "পেমেন্ট রিকোয়েস্টটি প্রত্যাখ্যান করা হয়েছে।" : item.status === "APPROVED" ? "আপনার কোর্স অ্যাক্সেস চালু হয়েছে।" : "আপনার পেমেন্ট তথ্য যাচাই করা হচ্ছে।"}</p></article>)}{!enrollments.length && <div className="enrollment-empty"><Empty text="আপনি এখনও কোনো কোর্সে ভর্তি হননি। কোর্স তালিকা থেকে পছন্দের কোর্স বেছে নিন।" /></div>}</div></section>}
         {user.role === "STUDENT" && tab === "Study Materials" && <section><div className="section-heading"><div><h2>স্টাডি ম্যাটেরিয়াল</h2><p className="muted">অনুমোদিত কোর্সের পাঠ্য উপকরণ।</p></div></div><CourseSelector courses={courses} enrollments={enrollments} value={selectedMaterialCourse} onChange={setSelectedMaterialCourse} /><MaterialList materials={materials} /></section>}
         {user.role === "STUDENT" && tab === "Exams" && <section>
           {examTaking ? <div className="panel exam-taking">
             <div className="exam-live-header"><div><span className="eyebrow">পরীক্ষা চলছে</span><h2>{examTaking.title}</h2></div><div className={`exam-countdown${remainingSeconds < 60 ? " urgent" : ""}`} role="timer" aria-live="polite"><small>সময় বাকি</small><strong>{String(Math.floor(remainingSeconds / 60)).padStart(2, "0")}:{String(remainingSeconds % 60).padStart(2, "0")}</strong></div></div>
-            <div className="exam-progress-bar"><span>{answers.filter((answer) => answer >= 0).length}/{answers.length} Answered</span><span>{answers.filter((answer) => answer < 0).length} বাকি</span><i><b style={{ width: `${answers.filter((answer) => answer >= 0).length / Math.max(answers.length, 1) * 100}%` }} /></i></div>
-            <nav className="question-nav" aria-label="প্রশ্ন নির্বাচন">{examTaking.questions.map((_, index) => <button key={index} type="button" className={`${index === currentQuestion ? "current" : ""}${answers[index] >= 0 ? " answered" : ""}`} aria-current={index === currentQuestion ? "step" : undefined} aria-label={`প্রশ্ন ${index + 1}${answers[index] >= 0 ? ", উত্তর দেওয়া হয়েছে" : ", উত্তর বাকি"}`} onClick={() => setCurrentQuestion(index)}>{index + 1}</button>)}</nav>
-            {(() => { const question = examTaking.questions[currentQuestion]; return <div className="take-question" key={currentQuestion}><h3>{currentQuestion + 1}. {question.prompt}<span>{question.marks} নম্বর</span></h3>{question.options.map((option, optionIndex) => <label className={`answer-option ${answers[currentQuestion] === optionIndex ? "chosen" : ""}`} key={optionIndex}><input type="radio" name={`question-${currentQuestion}`} checked={answers[currentQuestion] === optionIndex} onChange={() => setAnswers(answers.map((answer, answerIndex) => answerIndex === currentQuestion ? optionIndex : answer))} />{String.fromCharCode(65 + optionIndex)}. {option}</label>)}</div>; })()}
-            <div className="exam-navigation-actions"><button className="secondary" disabled={currentQuestion === 0} onClick={() => setCurrentQuestion((question) => Math.max(0, question - 1))}>← আগের প্রশ্ন</button><button className="secondary" disabled={currentQuestion === examTaking.questions.length - 1} onClick={() => setCurrentQuestion((question) => Math.min(examTaking.questions.length - 1, question + 1))}>পরের প্রশ্ন →</button><button className="primary" disabled={busy} onClick={submitExam}>পরীক্ষা জমা দিন</button></div>
+            <div className="exam-question-progress">
+              <div className="exam-progress-bar"><span>{answers.filter((answer) => answer >= 0).length}/{answers.length} উত্তর দেওয়া</span><span>{answers.filter((answer) => answer < 0).length} বাকি</span><i><b style={{ width: `${answers.filter((answer) => answer >= 0).length / Math.max(answers.length, 1) * 100}%` }} /></i></div>
+              <nav className="question-nav" aria-label="প্রশ্নে যান">{examTaking.questions.map((_, index) => <button key={index} type="button" className={`${index === currentQuestion ? "current" : ""} ${answers[index] >= 0 ? "answered" : "unanswered"}`} aria-current={index === currentQuestion ? "step" : undefined} aria-label={`প্রশ্ন ${index + 1}${answers[index] >= 0 ? ", উত্তর দেওয়া হয়েছে" : ", উত্তর বাকি"}`} onClick={() => document.getElementById(`exam-question-${index}`)?.scrollIntoView({ behavior: "smooth", block: "start" })}>{index + 1}</button>)}</nav>
+              <div className="question-nav-legend"><span><i /> উত্তর দেওয়া হয়েছে</span><span>{answers.filter((answer) => answer < 0).length}টি উত্তর বাকি</span></div>
+              <p className="question-nav-hint">যেকোনো প্রশ্নে যেতে নিচে স্ক্রল করুন, অথবা প্রশ্ন নম্বরে চাপুন।</p>
+            </div>
+            <div className="exam-question-list" ref={examQuestionList}>{examTaking.questions.map((question, index) => <article className={`take-question${answers[index] >= 0 ? " answered" : ""}`} id={`exam-question-${index}`} data-question-index={index} key={index}>
+              <h3><span className="take-question-number">{String(index + 1).padStart(2, "0")}</span><span className="take-question-prompt">{question.prompt}</span><span className="take-question-marks">{question.marks} নম্বর</span></h3>
+              <div className="take-question-options">{question.options.map((option, optionIndex) => <label className={`answer-option ${answers[index] === optionIndex ? "chosen" : ""}`} key={optionIndex}><input type="radio" name={`question-${index}`} checked={answers[index] === optionIndex} onChange={() => setAnswers(answers.map((answer, answerIndex) => answerIndex === index ? optionIndex : answer))} /><span className="answer-option-letter">{String.fromCharCode(65 + optionIndex)}</span><span>{option}</span></label>)}</div>
+              {answers[index] < 0 && <span className="question-unanswered-label">এখনও উত্তর দেওয়া হয়নি</span>}
+            </article>)}</div>
+            <div className="exam-submit-bar"><div><strong>{answers.filter((answer) => answer >= 0).length} / {answers.length}</strong><span>{answers.filter((answer) => answer < 0).length}টি প্রশ্নের উত্তর বাকি</span></div><button className="primary" disabled={isSubmittingExam} onClick={() => void submitExam()}>{isSubmittingExam ? "জমা হচ্ছে..." : "পরীক্ষা জমা দিন"}</button></div>
           </div> : <>
             <div className="section-heading"><div><h2>MCQ পরীক্ষা</h2><p className="muted">প্রকাশিত পরীক্ষায় অংশ নিতে অনুমোদিত কোর্স নির্বাচন করুন।</p></div></div>
             <CourseSelector courses={courses} enrollments={enrollments} value={selectedMaterialCourse} onChange={setSelectedMaterialCourse} />
             {exams.map((exam) => <article className="exam-card" key={exam.id}>
               <div className="exam-icon">▣</div>
-              <div className="exam-info"><strong>{exam.title}</strong><p>{exam.questionCount} প্রশ্ন · {exam.durationMinutes} মিনিট · Pass mark {exam.passMark}</p><small>পরীক্ষার সময়: {new Date(exam.startsAt).toLocaleString("bn-BD")} – {new Date(exam.endsAt).toLocaleString("bn-BD")}</small></div>
+              <div className="exam-info"><strong>{exam.title}</strong><p>{exam.questionCount}টি প্রশ্ন · {exam.durationMinutes} মিনিট · পাস নম্বর {exam.passMark}</p><small>পরীক্ষার সময়: {new Date(exam.startsAt).toLocaleString("bn-BD")} – {new Date(exam.endsAt).toLocaleString("bn-BD")}</small></div>
               <div className="student-result"><p className="exam-policy">মেধাতালিকা: {exam.leaderboardRule === "FIRST" ? "প্রথম প্রচেষ্টা" : exam.leaderboardRule === "LATEST" ? "সর্বশেষ প্রচেষ্টা" : "সর্বোচ্চ নম্বর"}{exam.negativeMarkingEnabled ? ` · ভুল উত্তরে -${exam.negativeMarks}` : " · নেগেটিভ মার্কিং নেই"}</p>{exam.results.length > 0 && <ExamAttemptHistory exam={exam} />}<button className="primary" onClick={() => startExam(exam)}>{exam.results.length ? "আবার পরীক্ষা দিন →" : "পরীক্ষা শুরু করুন →"}</button></div>
             </article>)}
             {selectedMaterialCourse && exams.length === 0 && <Empty text="এই কোর্সে এখন কোনো পরীক্ষা নেই।" />}
           </>}
         </section>}
+        </>}
       </div>
     </main>
     {paymentCourse && <div className="modal-backdrop" onClick={() => setPaymentCourse(null)}><section className="modal" onClick={(event) => event.stopPropagation()}><div className="section-heading"><div><span className="eyebrow">ENROLLMENT REQUEST</span><h2>পেমেন্ট তথ্য জমা দিন</h2></div><button className="icon-button" onClick={() => setPaymentCourse(null)}>×</button></div><div className="payment-course"><strong>{paymentCourse.title}</strong><span>{money(paymentCourse.fee)}</span></div><p className="instruction">{paymentCourse.paymentInstructions}</p><form className="stack-form" onSubmit={(event) => submitForm(event, submitPayment)}><label>Payment Method<select name="paymentMethod"><option value="BKASH">bKash</option><option value="NAGAD">Nagad</option></select></label><label>Transaction ID<input name="transactionId" placeholder="যেমন: 8F72K9A1" required minLength={5} maxLength={40} /></label><label>Sender Mobile Number<input name="senderMobile" placeholder="01XXXXXXXXX" required /></label><p className="warning-note">এটি একটি UI-ভিত্তিক তথ্য জমা। এই ফর্মে প্রকৃত পেমেন্ট বা স্বয়ংক্রিয় যাচাই হচ্ছে না। Admin অনুমোদন না দেওয়া পর্যন্ত কোর্স আনলক হবে না।</p><button className="primary wide" disabled={busy}>পেমেন্ট রিকোয়েস্ট জমা দিন</button></form></section></div>}
     {editingCourse && <div className="modal-backdrop" onClick={() => setEditingCourse(null)}><section className="modal" onClick={(event) => event.stopPropagation()}><div className="section-heading"><div><span className="eyebrow">COURSE MANAGEMENT</span><h2>কোর্স সম্পাদনা</h2></div><button className="icon-button" onClick={() => setEditingCourse(null)}>×</button></div><form className="stack-form" onSubmit={(event) => submitForm(event, saveCourse)}><label>কোর্সের নাম<input name="title" defaultValue={editingCourse.title} required /></label><label>বিবরণ<textarea name="description" rows={3} defaultValue={editingCourse.description} required /></label><label>কোর্স ফি (৳)<input name="fee" type="number" min="0" defaultValue={editingCourse.fee} required /></label><label>পেমেন্ট নির্দেশনা<textarea name="paymentInstructions" rows={2} defaultValue={editingCourse.paymentInstructions} required /></label><div className="edit-course-cover"><strong>কোর্সের কভার ছবি</strong>{(coverImagePreview || (!coverImageRemoved && coverImageUrl)) && <img src={coverImagePreview || coverImageUrl} alt="কোর্স কভার প্রিভিউ" />}<label className="cover-upload">ছবি নির্বাচন করুন<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const file = event.target.files?.[0]; if (file) void runAction(async () => { setCoverImageFile(await compressCourseImage(file)); setCoverImageRemoved(false); }); }} /></label>{(coverImageFile || coverImageUrl) && <button className="text-button danger-text" type="button" onClick={() => { setCoverImageFile(null); setCoverImageRemoved(true); }}>ছবি সরান</button>}<small>ছবির ফাইল MongoDB GridFS-এ থাকবে; course record-এ এর URL রাখা হবে।</small></div><label className="check-label"><input type="checkbox" name="published" defaultChecked={editingCourse.published} /> কোর্স প্রকাশ করুন</label><button className="primary" disabled={busy}>পরিবর্তন সংরক্ষণ</button></form></section></div>}
+    {rejectionTarget && <div className="modal-backdrop" onClick={() => { if (!busy) setRejectionTarget(null); }}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="reject-payment-title" onClick={(event) => event.stopPropagation()}><div className="section-heading"><div><span className="eyebrow">পেমেন্ট যাচাই</span><h2 id="reject-payment-title">প্রত্যাখ্যানের কারণ</h2></div><button className="icon-button" type="button" aria-label="বন্ধ করুন" disabled={busy} onClick={() => setRejectionTarget(null)}>×</button></div><p className="muted">কারণটি শিক্ষার্থীকে দেখানো হবে, যাতে প্রয়োজন হলে সঠিক তথ্য দিয়ে আবার আবেদন করতে পারেন।</p>{error && <p className="alert error" role="alert" aria-live="assertive">{error}</p>}<form className="stack-form" onSubmit={(event) => submitForm(event, rejectPayment)}><label htmlFor="rejection-reason">প্রত্যাখ্যানের কারণ<textarea id="rejection-reason" name="rejectionReason" rows={4} required autoFocus placeholder="যেমন: Transaction ID যাচাই করা যায়নি।" /></label><div className="action-row"><button type="button" className="secondary" disabled={busy} onClick={() => setRejectionTarget(null)}>বাতিল</button><button type="submit" className="reject-button" disabled={busy}>{busy ? "সংরক্ষণ হচ্ছে…" : "প্রত্যাখ্যান নিশ্চিত করুন"}</button></div></form></section></div>}
   </div>;
 }
 
 function icon(label: string) {
   const symbols: Record<string, string> = { Dashboard: "▦", Students: "♧", "Payment Requests": "৳", Courses: "▤", "Study Materials": "▧", "MCQ Exam Builder": "☷", Results: "▥", "Course Catalog": "⌕", "My Enrollments": "▣", Exams: "▤" };
   return symbols[label] ?? "◦";
+}
+
+function navigationLabel(label: string) {
+  const labels: Record<string, string> = {
+    Dashboard: "ড্যাশবোর্ড",
+    Students: "শিক্ষার্থী",
+    "Payment Requests": "পেমেন্ট রিকোয়েস্ট",
+    Courses: "কোর্স",
+    "Study Materials": "স্টাডি ম্যাটেরিয়াল",
+    "MCQ Exam Builder": "পরীক্ষা তৈরি",
+    Results: "ফলাফল",
+    "Course Catalog": "কোর্স তালিকা",
+    "My Enrollments": "আমার এনরোলমেন্ট",
+    Exams: "পরীক্ষা"
+  };
+  return labels[label] ?? label;
+}
+
+function AdminResultsPanel({ results, onRefresh }: { results: ResultRow[]; onRefresh: () => Promise<void> }) {
+  const [search, setSearch] = useState("");
+  const [examFilter, setExamFilter] = useState("");
+  const [outcomeFilter, setOutcomeFilter] = useState<"ALL" | "PASSED" | "FAILED">("ALL");
+  const examTitles = [...new Set(results.map((result) => result.exam.title))].sort((left, right) => left.localeCompare(right));
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const filteredResults = results.filter((result) => {
+    const matchesSearch = !normalizedSearch || [result.student.name, result.student.email, result.student.mobile, result.exam.title]
+      .some((value) => value?.toLocaleLowerCase().includes(normalizedSearch));
+    const matchesExam = !examFilter || result.exam.title === examFilter;
+    const matchesOutcome = outcomeFilter === "ALL" || (outcomeFilter === "PASSED" ? result.passed : !result.passed);
+    return matchesSearch && matchesExam && matchesOutcome;
+  });
+  const participantCount = new Set(results.map((result) => `${result.exam.title}:${result.student.email ?? result.student.mobile ?? result.student.name}`)).size;
+  const passedCount = results.filter((result) => result.passed).length;
+  const failedCount = results.length - passedCount;
+  const averagePercent = results.length
+    ? results.reduce((sum, result) => sum + (result.totalMarks > 0 ? result.score / result.totalMarks * 100 : 0), 0) / results.length
+    : 0;
+  const hasFilters = Boolean(search || examFilter || outcomeFilter !== "ALL");
+
+  function clearFilters() {
+    setSearch("");
+    setExamFilter("");
+    setOutcomeFilter("ALL");
+  }
+
+  return <section className="admin-results">
+    <div className="admin-results-heading">
+      <div><span className="eyebrow">PERFORMANCE OVERVIEW</span><h2>পরীক্ষার ফলাফল</h2><p>শিক্ষার্থীদের স্কোর, উত্তর ও মেধাস্থান এক জায়গায় দেখুন।</p></div>
+      <button className="secondary admin-results-refresh" type="button" onClick={() => void onRefresh()}>↻ &nbsp;Refresh results</button>
+    </div>
+    <div className="admin-results-stats">
+      <div><span>মোট প্রচেষ্টা</span><strong>{results.length.toLocaleString("bn-BD")}</strong><small>সব পরীক্ষার জমা</small></div>
+      <div><span>অংশগ্রহণকারী</span><strong>{participantCount.toLocaleString("bn-BD")}</strong><small>পরীক্ষাভিত্তিক শিক্ষার্থী</small></div>
+      <div><span>উত্তীর্ণ</span><strong className="result-stat-pass">{passedCount.toLocaleString("bn-BD")}</strong><small>পাস করা প্রচেষ্টা</small></div>
+      <div><span>অনুত্তীর্ণ</span><strong className="result-stat-fail">{failedCount.toLocaleString("bn-BD")}</strong><small>পাস না করা প্রচেষ্টা</small></div>
+      <div><span>গড় স্কোর</span><strong>{formatMarks(averagePercent)}%</strong><small>মোট নম্বরের তুলনায়</small></div>
+    </div>
+    <div className="admin-results-toolbar">
+      <label className="admin-results-search"><span aria-hidden="true">⌕</span><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="শিক্ষার্থী, ইমেইল বা পরীক্ষা খুঁজুন" aria-label="শিক্ষার্থী, ইমেইল বা পরীক্ষা খুঁজুন" /></label>
+      <label>পরীক্ষা<select value={examFilter} onChange={(event) => setExamFilter(event.target.value)}><option value="">সব পরীক্ষা</option>{examTitles.map((exam) => <option value={exam} key={exam}>{exam}</option>)}</select></label>
+      <label>ফলাফল<select value={outcomeFilter} onChange={(event) => setOutcomeFilter(event.target.value as typeof outcomeFilter)}><option value="ALL">সব ফলাফল</option><option value="PASSED">উত্তীর্ণ</option><option value="FAILED">অনুত্তীর্ণ</option></select></label>
+      {hasFilters && <button className="text-button admin-results-clear" type="button" onClick={clearFilters}>ফিল্টার মুছুন</button>}
+      <span className="admin-results-count">{filteredResults.length.toLocaleString("bn-BD")} / {results.length.toLocaleString("bn-BD")} ফলাফল</span>
+    </div>
+    <div className="admin-results-list">
+      {filteredResults.map((result) => <details className="admin-result-card" key={result.id}>
+        <summary>
+          <span className="avatar small admin-result-avatar">{result.student.name.slice(0, 1).toUpperCase()}</span>
+          <span className="admin-result-identity"><strong>{result.student.name}</strong><small>{result.student.email ?? result.student.mobile ?? "যোগাযোগের তথ্য নেই"}</small><span>{result.exam.title} · প্রচেষ্টা {result.attemptNumber} · {new Date(result.submittedAt).toLocaleString("bn-BD")}</span></span>
+          <span className="admin-result-score"><strong>{formatMarks(result.score)} <small>/ {formatMarks(result.totalMarks)}</small></strong><span className={`status ${result.passed ? "approved" : "rejected"}`}>{result.passed ? "উত্তীর্ণ" : "অনুত্তীর্ণ"}</span></span>
+          <span className="admin-result-rank"><small>মেধাস্থান</small><strong>{result.rank.toLocaleString("bn-BD")}<span> / {result.rankTotal.toLocaleString("bn-BD")}</span></strong></span>
+          <span className="admin-result-chevron" aria-hidden="true">⌄</span>
+        </summary>
+        <div className="admin-result-details">
+          <div className="admin-result-metrics">
+            <div><span>সঠিক উত্তরের নম্বর</span><strong>{formatMarks(result.correctMarks)}</strong></div>
+            <div><span>নেগেটিভ কাটা</span><strong className={result.negativeMarksDeducted ? "deducted-marks" : ""}>{formatMarks(result.negativeMarksDeducted)}{result.scoreFloorApplied && <small> · সর্বনিম্ন ০</small>}</strong></div>
+            <div><span>সঠিক উত্তর</span><strong>{result.correctCount}</strong></div>
+            <div><span>ভুল উত্তর</span><strong>{result.wrongCount}</strong></div>
+            <div><span>উত্তরহীন</span><strong>{result.unansweredCount}</strong></div>
+          </div>
+          <h3 className="admin-answer-heading">উত্তর পর্যালোচনা <span>{result.details.length}টি প্রশ্ন</span></h3>
+          <div className="admin-answer-list">{result.details.map((answer, index) => <article className={`admin-answer-card ${answer.isCorrect ? "correct" : answer.chosen === "উত্তর দেননি" ? "unanswered" : "incorrect"}`} key={`${result.id}-${index}`}>
+            <div className="admin-answer-title"><span>{String(index + 1).padStart(2, "0")}</span><strong>{answer.prompt}</strong><b>{formatMarks(answer.earnedMarks)} / {formatMarks(answer.marks)}</b></div>
+            <p className={answer.isCorrect ? "correct-answer" : answer.chosen === "উত্তর দেননি" ? "admin-answer-unanswered" : "wrong-answer"}>শিক্ষার্থীর উত্তর: {answer.chosen || "উত্তর দেননি"} {answer.isCorrect ? "✓" : answer.chosen === "উত্তর দেননি" ? "—" : "✗"}</p>
+            {!answer.isCorrect && <p className="correct-answer">সঠিক উত্তর: {answer.correct}</p>}
+            {answer.explanation && <p className="answer-explanation"><strong>ব্যাখ্যা:</strong> {answer.explanation}</p>}
+          </article>)}</div>
+        </div>
+      </details>)}
+      {!filteredResults.length && <div className="admin-results-empty"><span>⌕</span><strong>{results.length ? "কোনো ফলাফল মেলেনি" : "এখনও পরীক্ষার ফল নেই"}</strong><p>{results.length ? "অন্য নাম, পরীক্ষা বা ফলাফলের ফিল্টার দিয়ে চেষ্টা করুন।" : "শিক্ষার্থীরা পরীক্ষা জমা দিলে ফলাফল এখানে দেখা যাবে।"}</p>{hasFilters && <button className="secondary" type="button" onClick={clearFilters}>সব ফলাফল দেখুন</button>}</div>}
+    </div>
+  </section>;
 }
 
 function LandingPage({ courses, error, onLogin, onRegister }: { courses: Course[]; error: string; onLogin: () => void; onRegister: () => void }) {
@@ -648,7 +814,8 @@ function LandingPage({ courses, error, onLogin, onRegister }: { courses: Course[
 }
 
 function StatusPill({ status }: { status: string }) {
-  return <span className={`status ${status.toLowerCase()}`}>{status}</span>;
+  const labels: Record<string, string> = { PENDING: "অপেক্ষমাণ", APPROVED: "অনুমোদিত", REJECTED: "প্রত্যাখ্যাত" };
+  return <span className={`status ${status.toLowerCase()}`}>{labels[status] ?? status}</span>;
 }
 
 function Empty({ text }: { text: string }) {
@@ -656,7 +823,7 @@ function Empty({ text }: { text: string }) {
 }
 
 function PaymentTable({ requests, decide, isAdmin }: { requests: Enrollment[]; decide: (enrollment: Enrollment, status: "APPROVED" | "REJECTED") => void; isAdmin?: boolean }) {
-  return <div className="table-wrap"><table><thead><tr><th>শিক্ষার্থী</th><th>কোর্স</th><th>Payment info</th><th>Transaction ID</th><th>অবস্থা</th>{isAdmin && <th>সিদ্ধান্ত</th>}</tr></thead><tbody>{requests.map((request) => <tr key={request._id}><td>{request.student?.name ?? "—"}<small className="block muted">{request.student?.email ?? request.student?.mobile}</small></td><td>{typeof request.course === "object" ? request.course.title : "—"}</td><td>{request.paymentMethod}<small className="block muted">{request.senderMobile}</small></td><td className="mono">{request.transactionId}</td><td><StatusPill status={request.status} /></td>{isAdmin && <td>{request.status === "PENDING" ? <div className="action-row"><button className="approve-button" onClick={() => decide(request, "APPROVED")}>Approve</button><button className="reject-button" onClick={() => decide(request, "REJECTED")}>Reject</button></div> : <span className="muted">Reviewed</span>}</td>}</tr>)}</tbody></table>{requests.length === 0 && <Empty text="কোনো পেমেন্ট রিকোয়েস্ট নেই।" />}</div>;
+  return <div className={`table-wrap${isAdmin ? " admin-mobile-cards" : ""}`}><table><thead><tr><th>শিক্ষার্থী</th><th>কোর্স</th><th>পেমেন্টের তথ্য</th><th>Transaction ID</th><th>অবস্থা</th>{isAdmin && <th>সিদ্ধান্ত</th>}</tr></thead><tbody>{requests.map((request) => <tr key={request._id}><td data-label="শিক্ষার্থী">{request.student?.name ?? "—"}<small className="block muted">{request.student?.email ?? request.student?.mobile}</small></td><td data-label="কোর্স">{typeof request.course === "object" ? request.course.title : "—"}</td><td data-label="পেমেন্টের তথ্য">{request.paymentMethod}<small className="block muted">{request.senderMobile}</small></td><td data-label="Transaction ID" className="mono">{request.transactionId}</td><td data-label="অবস্থা"><StatusPill status={request.status} /></td>{isAdmin && <td data-label="সিদ্ধান্ত">{request.status === "PENDING" ? <div className="action-row"><button className="approve-button" onClick={() => decide(request, "APPROVED")}>অনুমোদন</button><button className="reject-button" onClick={() => decide(request, "REJECTED")}>প্রত্যাখ্যান</button></div> : <span className="muted">পর্যালোচনা সম্পন্ন</span>}</td>}</tr>)}</tbody></table>{requests.length === 0 && <Empty text="কোনো পেমেন্ট রিকোয়েস্ট নেই।" />}</div>;
 }
 
 function CourseSelector({ courses, enrollments, value, onChange }: { courses: Course[]; enrollments: Enrollment[]; value: string; onChange: (value: string) => void }) {
