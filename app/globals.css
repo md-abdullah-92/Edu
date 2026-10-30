@@ -1378,3 +1378,92 @@ td { color: #34445a; }
   .app-shell .admin-mobile-cards .action-row button { padding-inline: 7px; font-size: 10px; }
   .app-shell .section-heading .pill { font-size: 10px; }
 }
+
+.admin-management { display: grid; gap: 18px; }
+.admin-management .admin-management-heading { margin-bottom: 0; align-items: flex-end; }
+.admin-management-heading .eyebrow { color: #4774d1; }
+.admin-management-heading h2 { margin-top: 5px; }
+.admin-management-panels { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 16px; }
+.admin-management .panel { padding: 21px; border-radius: 14px; }
+.admin-panel-heading { display: flex; align-items: center; gap: 11px; margin-bottom: 18px; }
+.admin-panel-heading > div { min-width: 0; flex: 1; }
+.admin-panel-heading h3 { margin: 0; color: #1b2940; font-size: 16px; line-height: 1.4; }
+.admin-panel-heading p { margin: 4px 0 0; color: #68778c; font-size: 12px; line-height: 1.5; }
+.admin-panel-icon { display: grid; flex: 0 0 40px; width: 40px; height: 40px; place-items: center; border-radius: 12px; font-size: 20px; font-weight: 700; }
+.course-panel-icon { background: #e3f5ec; color: #08745f; }
+.course-list-icon { background: #e8efff; color: #4774d1; }
+.material-panel-icon { background: #fff0e3; color: #bb672a; }
+.material-list-icon { background: #f0eaff; color: #7855bd; }
+.admin-management .stack-form { gap: 14px; }
+.admin-management .stack-form label { gap: 7px; color: #33445b; font-size: 13px; font-weight: 650; }
+.admin-management input:not([type=radio]):not([type=checkbox]),
+.admin-management textarea,
+.admin-management select { border-color: #dce5ef; border-radius: 9px; }
+.admin-management input:focus,
+.admin-management textarea:focus,
+.admin-management select:focus { border-color: #6a9bdd !important; box-shadow: 0 0 0 3px rgba(71,116,209,.11); }
+.admin-management .form-hint { display: block; margin: -2px 0 0; color: #68778c; font-size: 11px; line-height: 1.5; }
+.admin-management .admin-publish-check { align-items: flex-start; gap: 9px; padding: 11px 12px; border: 1px solid #dfece5; border-radius: 9px; background: #f4fbf7; line-height: 1.45; }
+.admin-management .admin-publish-check input { flex: 0 0 auto; margin-top: 3px; }
+.admin-management .admin-form-submit { min-height: 46px; }
+.admin-course-list { display: grid; gap: 10px; }
+.admin-course-list .course-admin {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid #e4eaf3;
+  border-left: 3px solid #4774d1;
+  border-radius: 11px;
+  background: linear-gradient(140deg, #fff, #f8faff);
+}
+.admin-course-list .course-admin:nth-child(4n + 2) { border-left-color: #07866c; background: linear-gradient(140deg,#fff,#f4fbf7); }
+.admin-course-list .course-admin:nth-child(4n + 3) { border-left-color: #7855bd; background: linear-gradient(140deg,#fff,#faf7ff); }
+.admin-course-list .course-admin:nth-child(4n + 4) { border-left-color: #d66b55; background: linear-gradient(140deg,#fff,#fff8f4); }
+.course-admin-info { display: grid; gap: 7px; min-width: 0; }
+.course-admin-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.course-admin-title-row > strong { min-width: 0; color: #1b2940; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.course-admin-title-row .status { flex: 0 0 auto; }
+.admin-course-list .course-admin-description { display: -webkit-box; overflow: hidden; margin: 0; color: #68778c; font-size: 12px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.course-admin-fee { color: #08745f; font-size: 13px; font-weight: 700; }
+.course-admin-fee small { margin-left: 4px; color: #68778c; font-size: 11px; font-weight: 400; }
+.admin-course-list .course-admin-actions { display: flex; flex-wrap: wrap; gap: 7px; padding-top: 10px; border-top: 1px solid #e8edf4; }
+.admin-course-list .course-admin-actions button { min-height: 38px; padding: 7px 11px; font-size: 11px; }
+.admin-course-list .course-admin-actions button:nth-child(2) { border-color: #c9d9ed; color: #34608f; background: #f3f7ff; }
+.admin-course-list .course-admin-actions .delete-course-button { border-color: #f0dddd; color: #a63e43; background: #fff8f8; }
+.admin-material-list-panel { min-width: 0; }
+.admin-material-course-select { display: grid; gap: 7px; margin-bottom: 12px; color: #33445b; font-size: 13px; font-weight: 650; }
+.admin-material-hint { margin: 0 0 12px; padding: 11px 12px; border: 1px dashed #cbd9ea; border-radius: 9px; background: #f5f8ff; color: #536789; font-size: 12px; line-height: 1.55; }
+.admin-material-list-panel .material-list { margin-top: 12px; }
+.admin-material-list-panel .material-item { min-width: 0; border-radius: 10px; background: #fff; }
+.admin-material-list-panel .material-item > span:nth-child(2) { min-width: 0; }
+.admin-material-list-panel .material-item strong { color: #24354d; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.admin-material-list-panel .material-item small { color: #68778c; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+
+@media (max-width: 760px) {
+  .admin-management { gap: 14px; }
+  .admin-management .admin-management-heading { align-items: flex-start; }
+  .admin-management .admin-management-heading h2 { font-size: 20px; }
+  .admin-management .admin-management-heading p { font-size: 12px; }
+  .admin-management-panels { grid-template-columns: minmax(0,1fr); gap: 12px; }
+  .admin-management .panel { padding: 15px; }
+  .admin-panel-heading { margin-bottom: 15px; }
+  .admin-panel-heading h3 { font-size: 15px; }
+  .admin-panel-heading p { font-size: 11px; }
+  .admin-management .stack-form { gap: 13px; }
+  .admin-management .stack-form label, .admin-material-course-select { font-size: 14px; }
+  .admin-management .form-hint { font-size: 11px; }
+  .admin-course-list .course-admin { padding: 12px; }
+  .admin-course-list .course-admin-actions { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .admin-course-list .course-admin-actions button { min-height: 42px; white-space: normal; }
+  .admin-course-list .course-admin-actions .delete-course-button { grid-column: 1 / -1; }
+  .admin-material-hint { font-size: 11px; }
+  .admin-material-list-panel .material-item { min-height: 66px; padding: 11px; }
+}
+
+@media (max-width: 430px) {
+  .admin-management .admin-management-heading .pill { padding: 5px 8px; }
+  .admin-panel-icon { flex-basis: 36px; width: 36px; height: 36px; }
+  .admin-management .panel { padding: 13px; }
+  .course-admin-title-row { align-items: flex-start; flex-direction: column; gap: 6px; }
+}
