@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { connectDB } from "@/lib/db";
 import { Course, Enrollment, Exam, Result } from "@/lib/models";
+import { calculateExamScore, rankExamResults } from "@/lib/exam-results";
 import { errorResponse, isValidId } from "@/lib/http";
 
 type Context = { params: Promise<{ id: string }> };
@@ -25,34 +26,28 @@ export async function GET(_request: NextRequest, { params }: Context) {
     exams: exams.map(({ _id, questions, ...exam }) => {
       const examResults = results.filter((result) => String(result.exam) === String(_id));
       const ownResults = examResults.filter((result) => String(result.student._id) === user.id);
-      const rankedByStudent = new Map<string, typeof examResults[number]>();
-      for (const result of examResults) {
-        const studentId = String(result.student._id);
-        const current = rankedByStudent.get(studentId);
-        const useResult = !current || (exam.leaderboardRule === "FIRST"
-          ? result.submittedAt < current.submittedAt
-          : exam.leaderboardRule === "LATEST"
-            ? result.submittedAt > current.submittedAt
-            : result.score > current.score || (result.score === current.score && result.submittedAt < current.submittedAt));
-        if (useResult) rankedByStudent.set(studentId, result);
-      }
-      const rankedStudents = [...rankedByStudent.entries()]
-        .sort(([, left], [, right]) => right.score - left.score || left.submittedAt.valueOf() - right.submittedAt.valueOf());
-      const ownRank = rankedStudents.findIndex(([studentId]) => studentId === user.id) + 1;
-      const leaderboard = rankedStudents
-        .slice(0, 20)
-        .map(([studentId, result], index) => ({ rank: index + 1, name: (result.student as unknown as { name: string }).name, score: result.score, totalMarks: result.totalMarks, isCurrentStudent: studentId === user.id }));
+      const rankedStudents = rankExamResults(
+        examResults,
+        exam.leaderboardRule,
+        (result) => String(result.student._id),
+        (result) => result.score,
+        (result) => result.submittedAt
+      );
+      const ownRank = rankedStudents.find((entry) => entry.studentId === user.id)?.rank ?? rankedStudents.length;
+      const leaderboard = rankedStudents.map(({ studentId, result, rank }) => ({
+        rank,
+        name: (result.student as unknown as { name: string }).name,
+        score: result.score,
+        totalMarks: result.totalMarks,
+        isCurrentStudent: studentId === user.id
+      }));
       return {
         ...exam,
         id: String(_id),
         questionCount: questions.length,
         results: ownResults.map((result) => ({
           attemptNumber: result.attemptNumber ?? 1,
-          score: result.score,
-          totalMarks: result.totalMarks,
-          correctCount: result.correctCount,
-          wrongCount: result.wrongCount ?? 0,
-          unansweredCount: result.unansweredCount ?? 0,
+          ...calculateExamScore(questions, result.answers, exam.negativeMarkingEnabled, exam.negativeMarks),
           submittedAt: result.submittedAt,
           rank: ownRank,
           rankTotal: rankedStudents.length,
@@ -111,7 +106,7 @@ export async function POST(request: NextRequest, { params }: Context) {
       explanation: typeof question.explanation === "string" ? question.explanation.trim() : ""
     });
   }
-  const totalMarks = questions.reduce((sum, question) => sum + question.marks, 0);
+  const totalMarks = Number(questions.reduce((sum, question) => sum + question.marks, 0).toFixed(2));
   if (passMark > totalMarks) return errorResponse("Pass mark মোট নম্বরের বেশি হতে পারবে না।");
   await connectDB();
   if (!(await Course.exists({ _id: id }))) return errorResponse("কোর্সটি পাওয়া যায়নি।", 404);

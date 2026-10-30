@@ -206,15 +206,63 @@ td small.block { display: block; font-size: 9px; margin-top: 3px; }
 .question-nav button.current { outline: 2px solid var(--green); outline-offset: 1px; }
 .exam-navigation-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
 .exam-policy { color: var(--muted); font-size: 11px; margin: 0 0 10px; }
-.attempt-history { display: grid; gap: 8px; margin: 10px 0 14px; }
-.attempt-history > strong { font-size: 12px; }
-.attempt-history .exam-result-detail { border-top: 1px solid var(--line); padding-top: 6px; }
-.attempt-history .exam-result-detail summary { display: flex; justify-content: space-between; gap: 12px; }
-.attempt-history .exam-result-detail summary small { color: var(--muted); font-weight: 400; }
+.exam-submission-summary { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px 24px; align-items: center; margin-bottom: 22px; padding: 23px; border: 1px solid #d5e9df; border-radius: 14px; background: radial-gradient(ellipse at 100% 0, #eaf6ef 0, transparent 48%), #fff; box-shadow: 0 8px 26px rgba(23, 67, 49, .07); }
+.exam-submission-summary.not-passed { border-color: #efdfc3; background: radial-gradient(ellipse at 100% 0, #fff5e7 0, transparent 48%), #fff; }
+.exam-submission-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; grid-column: 1 / -1; }
+.exam-submission-heading .eyebrow { color: var(--green); font-size: 10px; font-weight: 800; letter-spacing: .09em; }
+.exam-submission-heading h2 { margin: 5px 0 3px; font-size: 19px; line-height: 1.35; }
+.exam-submission-heading p { margin: 0; color: var(--muted); font-size: 12px; }
+.exam-submission-summary .icon-button { flex: 0 0 auto; width: 32px; height: 32px; border: 1px solid #dce9e2; border-radius: 8px; background: #fff; color: #75827b; font-size: 19px; }
+.exam-submission-score { display: grid; gap: 5px; padding: 2px 23px 2px 0; border-right: 1px solid #e4eee8; }
+.exam-submission-score > strong { color: var(--green); font-size: clamp(29px, 4vw, 40px); line-height: 1; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+.exam-submission-summary.not-passed .exam-submission-score > strong { color: #9c6824; }
+.exam-submission-score > strong > span { color: #8b9991; font-size: .55em; font-weight: 500; letter-spacing: 0; }
+.exam-submission-score > span { color: var(--muted); font-size: 11px; }
+.exam-submission-metrics { display: grid; grid-template-columns: repeat(2, minmax(110px, 1fr)); gap: 8px; min-width: min(100%, 390px); }
+.exam-submission-metrics > div { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #e8efeb; border-radius: 9px; background: rgba(255,255,255,.82); }
+.exam-submission-metrics > div > span, .attempt-counts > div > span { color: var(--muted); font-size: 10px; }
+.exam-submission-metrics > div > strong { color: var(--ink); font-size: 15px; font-variant-numeric: tabular-nums; }
+.exam-submission-metrics small, .attempt-counts small { color: var(--muted); font-size: 10px; font-weight: 500; }
+.deducted-marks { color: #b24949 !important; }
+.attempt-history { display: grid; gap: 12px; margin: 14px 0 16px; }
+.attempt-history > h3 { margin: 0; color: var(--ink); font-size: 13px; }
+.attempt-history-list { display: grid; gap: 8px; }
 .attempt-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; }
+.attempt-history .exam-result-detail { overflow: hidden; border: 1px solid #e7ece9; border-radius: 10px; background: #fff; }
+.attempt-history .exam-result-detail > summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; color: var(--ink); font-size: 12px; list-style: none; }
+.attempt-history .exam-result-detail > summary::-webkit-details-marker { display: none; }
+.attempt-history .exam-result-detail > summary::after { content: "＋"; margin-left: auto; color: #77877e; font-size: 16px; }
+.attempt-history .exam-result-detail[open] > summary::after { content: "−"; }
+.attempt-history .exam-result-detail summary > span:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.attempt-history .attempt-summary-score { color: var(--green); font-variant-numeric: tabular-nums; font-weight: 700; }
+.attempt-history .exam-result-detail summary > small { color: var(--muted); font-size: 10px; font-weight: 400; }
+.attempt-result-meta { display: flex; align-items: center; gap: 10px; padding: 0 14px 10px; }
+.attempt-rank { color: var(--muted); font-size: 11px; }
+.attempt-rank strong { color: var(--green); }
+.attempt-history .attempt-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 7px; padding: 0 14px 12px; }
+.attempt-history .attempt-counts > div { display: grid; gap: 4px; padding: 9px 10px; border: 1px solid #edf0ee; border-radius: 8px; background: #fafcfb; }
+.attempt-history .attempt-counts > div > strong { color: var(--ink); font-size: 14px; font-variant-numeric: tabular-nums; }
+.attempt-history .exam-result-details { padding: 0 14px 14px; }
+.attempt-history .leaderboard-detail { margin-top: 2px; border-color: #dde9e2; }
+.attempt-history .leaderboard-detail > summary { background: #f7faf8; }
+.attempt-history .leaderboard-detail > summary > span:first-child { display: grid; gap: 3px; }
+.attempt-history .leaderboard-detail > summary > span:first-child > strong { font-size: 12px; }
+.attempt-history .leaderboard-detail > summary > span:first-child > small { color: var(--muted); font-size: 10px; font-weight: 400; }
+.leaderboard-expand { display: flex; align-items: center; gap: 8px; color: var(--green); font-size: 11px; }
+.leaderboard-expand b { font-size: 16px; transition: transform .15s ease; }
+.leaderboard-detail[open] .leaderboard-expand b { transform: rotate(180deg); }
 .answer-explanation { padding: 9px 10px; border-left: 2px solid #8ebba9; background: #f5faf7; color: #53625c; }
-.leaderboard-list { margin: 8px 0; padding: 0; list-style: none; }
-.leaderboard-list li { display: flex; justify-content: space-between; gap: 10px; padding: 9px 3px; border-bottom: 1px solid #edf0ef; font-size: 12px; }
+.leaderboard-list { max-height: 390px; overflow-y: auto; margin: 0; padding: 4px 12px 10px; list-style: none; overscroll-behavior: contain; }
+.leaderboard-list li { display: grid; grid-template-columns: 35px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 45px; padding: 7px 8px; border-bottom: 1px solid #edf0ee; font-size: 12px; }
+.leaderboard-list li.current-student { border-radius: 7px; background: #eaf6f0; color: var(--green); font-weight: 700; }
+.leaderboard-rank { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 8px; background: #f0f3f1; color: #66746d; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.leaderboard-list li:nth-child(1) .leaderboard-rank { background: #fff1cf; color: #9a6b13; }
+.leaderboard-list li:nth-child(2) .leaderboard-rank { background: #edf0f2; color: #687780; }
+.leaderboard-list li:nth-child(3) .leaderboard-rank { background: #f7e9db; color: #98613a; }
+.leaderboard-name { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.leaderboard-name > small { padding: 2px 6px; border-radius: 999px; background: #d7eee2; color: #267356; font-size: 9px; white-space: nowrap; }
+.leaderboard-list li > strong { color: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.leaderboard-list li > strong > small { color: var(--muted); font-size: 10px; font-weight: 400; }
 .whatsapp-link { color: var(--green); font-size: 12px; font-weight: 700; }
 .course-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 17px; }
 .course-card { border: 1px solid var(--line); border-radius: 9px; background: white; overflow: hidden; }
@@ -436,6 +484,21 @@ td small.block { display: block; font-size: 9px; margin-top: 3px; }
   .edit-course-cover { grid-template-columns: 1fr 1fr; }
   .edit-course-cover > strong, .edit-course-cover img, .edit-course-cover small { grid-column: 1 / -1; }
   .exam-settings-grid { grid-template-columns: 1fr; }
+  .exam-submission-summary { grid-template-columns: 1fr; gap: 14px; padding: 18px; }
+  .exam-submission-heading { grid-column: auto; }
+  .exam-submission-heading h2 { font-size: 17px; }
+  .exam-submission-score { padding: 0 0 12px; border-right: 0; border-bottom: 1px solid #e4eee8; }
+  .exam-submission-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
+  .exam-submission-metrics > div { padding: 9px; }
+  .exam-submission-metrics > div > span { font-size: 10px; line-height: 1.4; }
+  .attempt-history .exam-result-detail > summary { align-items: flex-start; padding: 12px; }
+  .attempt-history .exam-result-detail summary > small { max-width: 42%; text-align: right; line-height: 1.4; }
+  .attempt-history .exam-result-detail summary > span:first-child { gap: 6px; }
+  .attempt-history .attempt-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-inline: 12px; }
+  .attempt-history .exam-result-details { padding-inline: 12px; }
+  .leaderboard-list { max-height: 320px; padding-inline: 8px; }
+  .leaderboard-list li { grid-template-columns: 30px minmax(0, 1fr) auto; gap: 7px; padding-inline: 5px; font-size: 12px; }
+  .leaderboard-rank { width: 25px; height: 25px; }
   .exam-live-header { top: 68px; }
   .question-nav button { width: 42px; }
   .exam-navigation-actions > button { flex: 1 1 42%; }

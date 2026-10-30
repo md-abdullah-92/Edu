@@ -8,7 +8,7 @@ MongoDB-backed course management and online examination MVP using Next.js App Ro
 2. Copy `.env.example` to `.env.local` and set:
    - `MONGODB_URI` to the MongoDB connection string.
    - `SESSION_SECRET` to a random secret of at least 32 characters.
-   - `NEXT_PUBLIC_WHATSAPP_NUMBER` in international digits, for example `8801XXXXXXXXX`.
+   - Optionally override `NEXT_PUBLIC_WHATSAPP_NUMBER` in international digits. The default admin contact is `01825261654`.
 3. Install dependencies and start the app:
 
    ```sh

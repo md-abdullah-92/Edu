@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth";
 import { connectDB } from "@/lib/db";
 import { Attempt, Enrollment, Exam, Result } from "@/lib/models";
+import { calculateExamScore, rankExamResults } from "@/lib/exam-results";
 import { errorResponse, isValidId } from "@/lib/http";
 
 type Context = { params: Promise<{ id: string }> };
@@ -28,23 +29,13 @@ export async function POST(request: NextRequest, { params }: Context) {
       body.answers.some((answer: unknown) => !Number.isInteger(answer) || Number(answer) < -1 || Number(answer) > 3)) {
     return errorResponse("প্রতিটি প্রশ্নের জন্য বৈধ উত্তর নির্বাচন করুন অথবা ফাঁকা রাখুন।");
   }
-  const totalMarks = exam.questions.reduce((sum: number, question: { marks: number }) => sum + question.marks, 0);
-  let score = 0;
-  let correctCount = 0;
-  let wrongCount = 0;
-  let unansweredCount = 0;
-  exam.questions.forEach((question: { correctIndex: number; marks: number }, index: number) => {
-    if (body.answers[index] === question.correctIndex) {
-      score += question.marks;
-      correctCount += 1;
-    } else if (body.answers[index] < 0) {
-      unansweredCount += 1;
-    } else {
-      wrongCount += 1;
-      if (exam.negativeMarkingEnabled) score -= exam.negativeMarks;
-    }
-  });
-  score = Math.max(0, Number(score.toFixed(2)));
+  const scoreSummary = calculateExamScore(
+    exam.questions,
+    body.answers,
+    exam.negativeMarkingEnabled,
+    exam.negativeMarks
+  );
+  const { score, totalMarks, correctCount, wrongCount, unansweredCount } = scoreSummary;
   try {
     const result = await Result.create({
       exam: exam.id, student: student.id, attemptNumber: attempt.attemptNumber,
@@ -53,22 +44,15 @@ export async function POST(request: NextRequest, { params }: Context) {
     attempt.submittedAt = now;
     await attempt.save();
     const submittedResults = await Result.find({ exam: exam.id }).select("student score submittedAt").sort({ submittedAt: 1 }).lean();
-    const rankedByStudent = new Map<string, typeof submittedResults[number]>();
-    for (const submittedResult of submittedResults) {
-      const studentId = String(submittedResult.student);
-      const previous = rankedByStudent.get(studentId);
-      const useResult = !previous || (exam.leaderboardRule === "FIRST"
-        ? submittedResult.submittedAt < previous.submittedAt
-        : exam.leaderboardRule === "LATEST"
-          ? submittedResult.submittedAt > previous.submittedAt
-          : submittedResult.score > previous.score || (submittedResult.score === previous.score && submittedResult.submittedAt < previous.submittedAt));
-      if (useResult) rankedByStudent.set(studentId, submittedResult);
-    }
-    const rankedStudents = [...rankedByStudent.entries()].sort(([, left], [, right]) =>
-      right.score - left.score || left.submittedAt.valueOf() - right.submittedAt.valueOf()
+    const rankedStudents = rankExamResults(
+      submittedResults,
+      exam.leaderboardRule,
+      (result) => String(result.student),
+      (result) => result.score,
+      (result) => result.submittedAt
     );
-    const rank = rankedStudents.findIndex(([studentId]) => studentId === student.id) + 1;
-    return NextResponse.json({ result: { attemptNumber: attempt.attemptNumber, score, totalMarks, correctCount, wrongCount, unansweredCount, questionCount: exam.questions.length, passed: score >= exam.passMark, rank, rankTotal: rankedStudents.length } }, { status: 201 });
+    const ownRank = rankedStudents.find((entry) => entry.studentId === student.id);
+    return NextResponse.json({ result: { attemptNumber: attempt.attemptNumber, ...scoreSummary, questionCount: exam.questions.length, passed: score >= exam.passMark, rank: ownRank?.rank ?? rankedStudents.length, rankTotal: rankedStudents.length } }, { status: 201 });
   } catch (error) {
     if (typeof error === "object" && error && "code" in error && error.code === 11000) {
       return errorResponse("এই প্রচেষ্টাটি ইতিমধ্যে জমা হয়েছে।", 409);
