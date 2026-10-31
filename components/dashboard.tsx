@@ -54,7 +54,7 @@ type ResultRow = {
   details: Array<{ prompt: string; chosen: string; correct: string; isCorrect: boolean; marks: number; earnedMarks: number; explanation: string }>;
 };
 
-const whatsappNumber = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "01825261654";
+const whatsappNumber = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "01825361654";
 const whatsappDigits = whatsappNumber.replace(/\D/g, "").replace(/^0/, "880");
 
 async function api<T>(url: string, options?: RequestInit): Promise<T> {
